@@ -9,9 +9,10 @@ from botocore.config import Config
 from google.cloud import secretmanager
 from google.cloud import storage
 from google.cloud import documentai
-# from google.cloud.documentai_toolbox import document  # Commented out for now
 import requests
 import functions_framework
+import PyPDF2
+import io
 
 @functions_framework.http
 def process_pdf(request):
@@ -64,7 +65,7 @@ def process_pdf(request):
         return {"status": "error", "error": str(e)}, 500
 
 def process_pdf_document(pdf_url, document_id, processor_id, project_id, location, r2_config):
-    """Process PDF using Document AI Toolbox"""
+    """Process PDF by chunking into 15-page segments for Document AI"""
     start_time = datetime.now()
     
     print(f"Processing PDF document: {document_id}")
@@ -73,38 +74,54 @@ def process_pdf_document(pdf_url, document_id, processor_id, project_id, locatio
     temp_pdf_path = download_pdf_to_temp(pdf_url)
     
     try:
-        # Process with Document AI
-        client = documentai.DocumentProcessorServiceClient()
-        
-        # Read PDF file
+        # Check PDF page count and split if necessary
         with open(temp_pdf_path, 'rb') as pdf_file:
-            pdf_content = pdf_file.read()
+            pdf_reader = PyPDF2.PdfReader(pdf_file)
+            total_pages = len(pdf_reader.pages)
+            
+        print(f"PDF has {total_pages} pages")
         
-        print(f"PDF file size: {len(pdf_content)} bytes")
+        if total_pages <= 15:
+            # Process normally if under page limit
+            print("PDF is under 15 pages, processing normally")
+            doc = process_single_pdf_chunk(temp_pdf_path, processor_id, project_id, location)
+            all_pages = doc.pages
+            combined_text = doc.text
+        else:
+            # Split into chunks and process each
+            print(f"PDF has {total_pages} pages, splitting into chunks")
+            chunks = split_pdf_into_chunks(temp_pdf_path, max_pages=15)
+            
+            all_pages = []
+            combined_text = ""
+            page_offset = 0
+            
+            for i, chunk_path in enumerate(chunks):
+                try:
+                    print(f"Processing chunk {i+1}/{len(chunks)}")
+                    chunk_doc = process_single_pdf_chunk(chunk_path, processor_id, project_id, location)
+                    
+                    # Adjust page numbers for chunks
+                    for page in chunk_doc.pages:
+                        # Update page number to reflect position in original document
+                        page.page_number = page.page_number + page_offset
+                    
+                    all_pages.extend(chunk_doc.pages)
+                    combined_text += chunk_doc.text + "\n"
+                    page_offset += len(chunk_doc.pages)
+                    
+                finally:
+                    # Clean up chunk file
+                    if os.path.exists(chunk_path):
+                        os.unlink(chunk_path)
         
-        # Configure Document AI request
-        processor_name = f"projects/{project_id}/locations/{location}/processors/{processor_id}"
+        # Create a combined document object
+        combined_doc = create_combined_document(all_pages, combined_text, total_pages)
         
-        # Process document
-        request = documentai.ProcessRequest(
-            name=processor_name,
-            raw_document=documentai.RawDocument(
-                content=pdf_content,
-                mime_type="application/pdf"
-            )
-        )
-        
-        print("Sending document to Document AI...")
-        result = client.process_document(request=request)
-        print("Document AI processing complete")
-        
-        # Work directly with Document AI result
-        doc = result.document
-        
-        print(f"Document has {len(doc.pages)} pages")
+        print(f"Combined document has {len(all_pages)} pages")
         
         # Extract and process data
-        processing_result = extract_and_process_data(doc, document_id, pdf_url, start_time)
+        processing_result = extract_and_process_data(combined_doc, document_id, pdf_url, start_time)
         
         # Upload to R2
         upload_result = upload_to_r2(processing_result, r2_config, document_id)
@@ -125,59 +142,84 @@ def process_pdf_document(pdf_url, document_id, processor_id, project_id, locatio
         if os.path.exists(temp_pdf_path):
             os.unlink(temp_pdf_path)
 
+def split_pdf_into_chunks(pdf_path, max_pages=15):
+    """Split PDF into chunks of max_pages or less"""
+    chunks = []
+    
+    with open(pdf_path, 'rb') as pdf_file:
+        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        total_pages = len(pdf_reader.pages)
+        
+        for start_page in range(0, total_pages, max_pages):
+            end_page = min(start_page + max_pages, total_pages)
+            
+            # Create a new PDF with the chunk
+            pdf_writer = PyPDF2.PdfWriter()
+            
+            for page_num in range(start_page, end_page):
+                pdf_writer.add_page(pdf_reader.pages[page_num])
+            
+            # Save chunk to temporary file
+            chunk_file = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
+            pdf_writer.write(chunk_file)
+            chunk_file.close()
+            
+            chunks.append(chunk_file.name)
+            print(f"Created chunk {len(chunks)}: pages {start_page+1}-{end_page}")
+    
+    return chunks
+
+def process_single_pdf_chunk(pdf_path, processor_id, project_id, location):
+    """Process a single PDF chunk with Document AI"""
+    client = documentai.DocumentProcessorServiceClient()
+    
+    # Read PDF file
+    with open(pdf_path, 'rb') as pdf_file:
+        pdf_content = pdf_file.read()
+    
+    print(f"Chunk file size: {len(pdf_content)} bytes")
+    
+    # Configure Document AI request
+    processor_name = f"projects/{project_id}/locations/{location}/processors/{processor_id}"
+    
+    # Process document
+    request = documentai.ProcessRequest(
+        name=processor_name,
+        raw_document=documentai.RawDocument(
+            content=pdf_content,
+            mime_type="application/pdf"
+        )
+    )
+    
+    print("Sending chunk to Document AI...")
+    result = client.process_document(request=request)
+    print("Document AI chunk processing complete")
+    
+    return result.document
+
+def create_combined_document(all_pages, combined_text, total_pages):
+    """Create a combined document object from processed chunks"""
+    # Create a mock document object with the combined data
+    class CombinedDocument:
+        def __init__(self, pages, text):
+            self.pages = pages
+            self.text = text
+            self.entities = []  # Empty for now
+    
+    return CombinedDocument(all_pages, combined_text)
+
 def extract_and_process_data(doc, document_id, pdf_url, start_time):
-    """Extract patterns and create optimized JSON structures"""
+    """Extract patterns with bounding boxes - no full text needed"""
     
     print("Extracting patterns and processing data...")
     
-    # Extract full text
-    full_text = doc.text
-    
-    # Extract patterns with context and bounding boxes
+    # Extract patterns with bounding boxes from Document AI tokens
     patterns = extract_patterns_with_context(doc)
-    
-    # Create page-by-page text index
-    page_text = {}
-    for page_num, page in enumerate(doc.pages, 1):
-        # Extract text from page
-        page_text_content = ""
-        for paragraph in page.paragraphs:
-            for word in paragraph.words:
-                for symbol in word.symbols:
-                    page_text_content += symbol.text
-                page_text_content += " "
-            page_text_content += "\n"
-        page_text[str(page_num)] = page_text_content
-    
-    # Build searchable word index
-    word_index = build_searchable_index(full_text)
     
     # Calculate confidence scores
     avg_confidence = calculate_average_confidence(doc)
     
-    # Create main document JSON
-    main_document = {
-        "document_id": document_id,
-        "source_url": pdf_url,
-        "processed_at": datetime.now().isoformat(),
-        "total_pages": len(doc.pages),
-        "full_text": full_text,
-        "processing_metadata": {
-            "total_entities": len(doc.entities) if hasattr(doc, 'entities') else 0,
-            "processing_time": str(datetime.now() - start_time),
-            "ocr_confidence": avg_confidence
-        }
-    }
-    
-    # Create search index JSON
-    search_index = {
-        "document_id": document_id,
-        "patterns": patterns,
-        "page_text": page_text,
-        "word_index": word_index
-    }
-    
-    # Create pattern summary JSON
+    # Create pattern summary with counts
     pattern_counts = {}
     total_patterns = 0
     pages_with_patterns = set()
@@ -188,6 +230,22 @@ def extract_and_process_data(doc, document_id, pdf_url, start_time):
         for instance in instances:
             pages_with_patterns.add(instance['page'])
     
+    # Create main results JSON - only patterns and metadata
+    main_document = {
+        "document_id": document_id,
+        "source_url": pdf_url,
+        "processed_at": datetime.now().isoformat(),
+        "total_pages": len(doc.pages),
+        "patterns": patterns,
+        "processing_metadata": {
+            "processing_time": str(datetime.now() - start_time),
+            "ocr_confidence": avg_confidence,
+            "total_patterns": total_patterns,
+            "pages_with_patterns": sorted(list(pages_with_patterns))
+        }
+    }
+    
+    # Create pattern summary JSON for quick lookup
     pattern_summary = {
         "document_id": document_id,
         "pattern_counts": pattern_counts,
@@ -200,59 +258,121 @@ def extract_and_process_data(doc, document_id, pdf_url, start_time):
     
     return {
         "main_document": main_document,
-        "search_index": search_index,
         "pattern_summary": pattern_summary
     }
 
 def extract_patterns_with_context(doc):
-    """Extract technical patterns with bounding boxes and context"""
+    """Extract technical patterns with bounding boxes from Document AI tokens"""
     patterns = {}
     
     # Define pattern regex - matching PT-1, PT1, M1, M-1, etc.
     pattern_regex = re.compile(r'\b(PT-?\d+|M-?\d+|[A-Z]-?\d+)\b', re.IGNORECASE)
     
-    print("Extracting patterns from document...")
+    print("Extracting patterns from Document AI tokens...")
     
-    # Use full document text for pattern matching
-    full_text = doc.text
-    matches = pattern_regex.finditer(full_text)
-    
-    for match in matches:
-        pattern_text = match.group().upper()
+    # Extract patterns from each page's tokens
+    for page_num, page in enumerate(doc.pages, 1):
+        if hasattr(page, 'tokens'):
+            for token in page.tokens:
+                # Get the text content of the token
+                token_text = ""
+                if hasattr(token, 'layout') and hasattr(token.layout, 'text_anchor'):
+                    text_segments = token.layout.text_anchor.text_segments
+                    for segment in text_segments:
+                        start_idx = getattr(segment, 'start_index', 0)
+                        end_idx = getattr(segment, 'end_index', len(doc.text))
+                        token_text += doc.text[start_idx:end_idx]
+                
+                # Check if token matches our pattern
+                if pattern_regex.match(token_text):
+                    pattern_text = token_text.upper().strip()
+                    
+                    if pattern_text not in patterns:
+                        patterns[pattern_text] = []
+                    
+                    # Extract bounding box
+                    bounding_box = None
+                    confidence = 0.95
+                    
+                    if hasattr(token, 'layout') and hasattr(token.layout, 'bounding_poly'):
+                        vertices = []
+                        if hasattr(token.layout.bounding_poly, 'vertices'):
+                            for vertex in token.layout.bounding_poly.vertices:
+                                vertices.append({
+                                    "x": getattr(vertex, 'x', 0),
+                                    "y": getattr(vertex, 'y', 0)
+                                })
+                            bounding_box = {
+                                "vertices": vertices
+                            }
+                    
+                    # Get confidence if available
+                    if hasattr(token, 'layout') and hasattr(token.layout, 'confidence'):
+                        confidence = token.layout.confidence
+                    
+                    patterns[pattern_text].append({
+                        "page": page_num,
+                        "text": token_text.strip(),
+                        "confidence": confidence,
+                        "bounding_box": bounding_box
+                    })
         
-        if pattern_text not in patterns:
-            patterns[pattern_text] = []
-        
-        # Get context around the match
-        context = get_context_around_match(full_text, match.group(), match.start(), context_length=30)
-        
-        # For simplicity, assign to page 1 unless we can determine the actual page
-        # In a full implementation, we'd map the character position to the specific page
-        page_num = 1
-        
-        patterns[pattern_text].append({
-            "page": page_num,
-            "text": match.group(),
-            "confidence": 0.95,  # Default confidence
-            "bounding_box": None,  # Would need more complex logic to extract from Document AI tokens
-            "context": context
-        })
+        # Also check blocks for patterns (fallback)
+        if hasattr(page, 'blocks'):
+            for block in page.blocks:
+                if hasattr(block, 'layout') and hasattr(block.layout, 'text_anchor'):
+                    text_segments = block.layout.text_anchor.text_segments
+                    block_text = ""
+                    for segment in text_segments:
+                        start_idx = getattr(segment, 'start_index', 0)
+                        end_idx = getattr(segment, 'end_index', len(doc.text))
+                        block_text += doc.text[start_idx:end_idx]
+                    
+                    # Find patterns in block text
+                    matches = pattern_regex.finditer(block_text)
+                    for match in matches:
+                        pattern_text = match.group().upper()
+                        
+                        if pattern_text not in patterns:
+                            patterns[pattern_text] = []
+                        
+                        # Extract bounding box from block
+                        bounding_box = None
+                        confidence = 0.90
+                        
+                        if hasattr(block, 'layout') and hasattr(block.layout, 'bounding_poly'):
+                            vertices = []
+                            if hasattr(block.layout.bounding_poly, 'vertices'):
+                                for vertex in block.layout.bounding_poly.vertices:
+                                    vertices.append({
+                                        "x": getattr(vertex, 'x', 0),
+                                        "y": getattr(vertex, 'y', 0)
+                                    })
+                                bounding_box = {
+                                    "vertices": vertices
+                                }
+                        
+                        # Get confidence if available
+                        if hasattr(block, 'layout') and hasattr(block.layout, 'confidence'):
+                            confidence = block.layout.confidence
+                        
+                        # Check if we already have this exact pattern on this page
+                        existing_pattern = False
+                        for existing in patterns[pattern_text]:
+                            if existing["page"] == page_num and existing["text"] == match.group().strip():
+                                existing_pattern = True
+                                break
+                        
+                        if not existing_pattern:
+                            patterns[pattern_text].append({
+                                "page": page_num,
+                                "text": match.group().strip(),
+                                "confidence": confidence,
+                                "bounding_box": bounding_box
+                            })
     
     print(f"Found patterns: {dict((k, len(v)) for k, v in patterns.items())}")
     return patterns
-
-def build_searchable_index(full_text):
-    """Build searchable word index excluding single letters"""
-    # Split text into words, keeping hyphens, dashes, slashes
-    words = re.findall(r'\b\w+(?:[-/]\w+)*\b', full_text)
-    
-    # Filter out single letters and deduplicate, but keep technical patterns
-    searchable_words = list(set([
-        word.lower() for word in words 
-        if len(word) > 1 or re.match(r'[A-Z]-?\d+', word, re.IGNORECASE)
-    ]))
-    
-    return sorted(searchable_words)
 
 def upload_to_r2(processing_result, r2_config, document_id):
     """Upload all JSON files directly to R2"""
@@ -304,17 +424,6 @@ def upload_to_r2(processing_result, r2_config, document_id):
     )
     uploaded_files['main_document'] = main_key
     print(f"Uploaded main document: {main_key}")
-    
-    # Upload search index
-    search_key = f"search/{document_id}.json"
-    r2_client.put_object(
-        Bucket=bucket_name,
-        Key=search_key,
-        Body=json.dumps(processing_result['search_index'], indent=2),
-        ContentType='application/json'
-    )
-    uploaded_files['search_index'] = search_key
-    print(f"Uploaded search index: {search_key}")
     
     # Upload pattern summary
     pattern_key = f"patterns/{document_id}.json"

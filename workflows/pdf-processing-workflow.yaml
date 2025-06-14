@@ -15,12 +15,6 @@ main:
           - document_id: ${"doc_" + string(int(sys.now()))}
           - processing_start_time: ${sys.now()}
     
-    - log_start:
-        call: sys.log
-        args:
-          severity: INFO
-          text: '${"Starting PDF processing for document: " + document_id + " from URL: " + validated_input.pdfUrl}'
-    
     - call_pdf_processor:
         call: process_pdf_with_retry
         args:
@@ -30,12 +24,6 @@ main:
           r2_config: ${validated_input.r2Config}
           callback_url: ${validated_input.callbackUrl}
         result: processing_result
-    
-    - log_success:
-        call: sys.log
-        args:
-          severity: INFO
-          text: '${"Successfully processed document: " + document_id + " in " + string(sys.now() - processing_start_time) + " seconds"}'
     
     - return_success:
         return:
@@ -65,11 +53,11 @@ validate_request:
           - validated_request:
               pdfUrl: ${request.pdfUrl}
               r2Config: ${request.r2Config}
-              callbackUrl: ${default(request.callbackUrl, "")}
+              callbackUrl: ""
               processorConfig:
-                processorId: ${default(request.processorId, "fa7abbc0ea6541c5")}
-                projectId: ${default(request.projectId, "ladders-doc-pipeline-462921")}
-                location: ${default(request.location, "us")}
+                processorId: "fa7abbc0ea6541c5"
+                projectId: "ladders-doc-pipeline-462921"
+                location: "us"
     
     - return_validated:
         return: ${validated_request}
@@ -120,10 +108,8 @@ process_pdf_with_retry:
           as: e
           steps:
             - log_error:
-                call: sys.log
-                args:
-                  severity: ERROR
-                  text: '${"PDF processing failed for document " + document_id + ": " + e.message}'
+                assign:
+                  - error_message: '${"PDF processing failed for document " + document_id + ": " + e.message}'
             - handle_processing_error:
                 switch:
                   - condition: ${e.code == 408 or e.code == 504}

@@ -50,10 +50,12 @@ echo "🔄 Starting workflow execution..."
 echo ""
 
 # Execute the workflow
-EXECUTION_ID=$(gcloud workflows run ${WORKFLOW_NAME} \
+EXECUTION_OUTPUT=$(gcloud workflows run ${WORKFLOW_NAME} \
   --location=${REGION} \
   --data="${TEST_PAYLOAD}" \
-  --format="value(name)" | cut -d'/' -f6)
+  --format="value(name)")
+
+EXECUTION_ID=$(echo "${EXECUTION_OUTPUT}" | rev | cut -d'/' -f1 | rev)
 
 echo "📊 Workflow execution started!"
 echo "Execution ID: ${EXECUTION_ID}"
@@ -127,7 +129,7 @@ for i in {1..20}; do
     
     echo ""
     echo "🚨 Error Details:"
-    echo "${ERROR}" | jq .
+    echo "${ERROR}"
     
     # Check Cloud Function logs for more details
     echo ""
