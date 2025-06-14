@@ -1,0 +1,4 @@
+#!/bin/bash
+
+# Simple wrapper for the commit script
+exec ./scripts/commit.sh "$@" 

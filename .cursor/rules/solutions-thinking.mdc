@@ -1,0 +1,9 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+- Think about a few possible scenarios or solutions to this request or problem.
+- Think through until you're 95% confident in your proposed implementation, ask clarifying questions until you're 95% certain.
+- Present the one you think is best suited to solve this issue and provide rationale for why you think it's the best one.
+- After confirming the plan with me, create a detailed plan document that breaks down the task into phases with references to file structure and specific files. Save all plan in ./docs

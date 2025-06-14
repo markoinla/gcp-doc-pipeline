@@ -1,0 +1,300 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Google Cloud Master Rule
+
+Comprehensive best practices for deploying and managing Google Cloud services using gcloud CLI.
+
+## 1. Authentication & Project Setup
+
+### Always authenticate properly
+```bash
+# Good: Use service account for automation
+gcloud auth activate-service-account --key-file=path/to/service-account.json
+
+# Good: Use application default credentials for development
+gcloud auth application-default login
+
+# Bad: Using personal credentials in production
+gcloud auth login
+```
+
+### Set project explicitly
+```bash
+# Good: Always specify project
+gcloud config set project YOUR_PROJECT_ID
+
+# Good: Use project flag in commands
+gcloud compute instances list --project=YOUR_PROJECT_ID
+
+# Bad: Relying on default project
+gcloud compute instances list
+```
+
+## 2. Resource Naming Conventions
+
+### Use consistent naming patterns
+```bash
+# Good: Environment-service-resource pattern
+gcloud compute instances create prod-api-server-01 \
+  --zone=us-central1-a
+
+# Good: Use labels for organization
+gcloud compute instances create api-server \
+  --labels=env=prod,team=backend,service=api
+
+# Bad: Inconsistent or unclear names
+gcloud compute instances create server1
+```
+
+## 3. Network Security
+
+### Implement proper firewall rules
+```bash
+# Good: Specific source ranges and ports
+gcloud compute firewall-rules create allow-api-access \
+  --allow tcp:8080 \
+  --source-ranges=10.0.0.0/8 \
+  --target-tags=api-server
+
+# Bad: Overly permissive rules
+gcloud compute firewall-rules create allow-all \
+  --allow tcp \
+  --source-ranges=0.0.0.0/0
+```
+
+### Use VPC and subnets
+```bash
+# Good: Create custom VPC with subnets
+gcloud compute networks create my-vpc \
+  --subnet-mode=custom
+
+gcloud compute networks subnets create my-subnet \
+  --network=my-vpc \
+  --range=10.0.0.0/24 \
+  --region=us-central1
+```
+
+## 4. IAM Best Practices
+
+### Use principle of least privilege
+```bash
+# Good: Specific roles for specific needs
+gcloud projects add-iam-policy-binding PROJECT_ID \
+  --member="serviceAccount:SERVICE_ACCOUNT_EMAIL" \
+  --role="roles/storage.objectViewer"
+
+# Bad: Overly broad permissions
+gcloud projects add-iam-policy-binding PROJECT_ID \
+  --member="serviceAccount:SERVICE_ACCOUNT_EMAIL" \
+  --role="roles/owner"
+```
+
+### Create custom roles when needed
+```bash
+# Good: Custom role with minimal permissions
+gcloud iam roles create customStorageRole \
+  --project=PROJECT_ID \
+  --title="Custom Storage Role" \
+  --description="Read-only access to specific buckets" \
+  --permissions="storage.objects.get,storage.objects.list"
+```
+
+## 5. Resource Management
+
+### Use deployment configurations
+```yaml
+# Good: Use deployment manager or Terraform
+# deployment.yaml
+resources:
+- name: my-instance
+  type: compute.v1.instance
+  properties:
+    zone: us-central1-a
+    machineType: zones/us-central1-a/machineTypes/n1-standard-1
+    disks:
+    - deviceName: boot
+      type: PERSISTENT
+      boot: true
+      autoDelete: true
+      initializeParams:
+        sourceImage: projects/debian-cloud/global/images/family/debian-11
+```
+
+### Enable monitoring and logging
+```bash
+# Good: Enable Cloud Monitoring
+gcloud services enable monitoring.googleapis.com
+
+# Good: Create log-based metrics
+gcloud logging metrics create error_count \
+  --description="Count of error logs" \
+  --log-filter='severity="ERROR"'
+```
+
+## 6. Cost Optimization
+
+### Use appropriate machine types
+```bash
+# Good: Right-sized instances
+gcloud compute instances create small-worker \
+  --machine-type=e2-micro \
+  --preemptible
+
+# Good: Use committed use discounts
+gcloud compute commitments create my-commitment \
+  --plan=12-month \
+  --type=general-purpose \
+  --region=us-central1
+```
+
+### Clean up unused resources
+```bash
+# Good: Regular cleanup scripts
+gcloud compute instances list --filter="status:TERMINATED" \
+  --format="value(name,zone)" | \
+  while read name zone; do
+    gcloud compute instances delete $name --zone=$zone --quiet
+  done
+```
+
+## 7. Backup and Disaster Recovery
+
+### Implement backup strategies
+```bash
+# Good: Automated disk snapshots
+gcloud compute disks snapshot DISK_NAME \
+  --snapshot-names=backup-$(date +%Y%m%d-%H%M%S) \
+  --zone=ZONE
+
+# Good: Cross-region backups
+gcloud compute snapshots create snapshot-name \
+  --source-disk=disk-name \
+  --source-disk-zone=us-central1-a \
+  --storage-location=us
+```
+
+## 8. Environment Management
+
+### Use different projects for environments
+```bash
+# Good: Separate projects for each environment
+gcloud config configurations create dev
+gcloud config set project my-project-dev
+
+gcloud config configurations create prod
+gcloud config set project my-project-prod
+```
+
+### Use environment-specific configurations
+```bash
+# Good: Environment variables for configuration
+export ENVIRONMENT=production
+export PROJECT_ID=my-project-prod
+export REGION=us-central1
+
+gcloud compute instances create ${ENVIRONMENT}-api-server \
+  --project=${PROJECT_ID} \
+  --zone=${REGION}-a
+```
+
+## 9. Monitoring and Alerting
+
+### Set up proper monitoring
+```bash
+# Good: Create alerting policies
+gcloud alpha monitoring policies create \
+  --policy-from-file=alert-policy.yaml
+
+# Good: Enable uptime checks
+gcloud monitoring uptime create \
+  --display-name="API Health Check" \
+  --http-check-path="/health"
+```
+
+## 10. Deployment Automation
+
+### Use CI/CD best practices
+```bash
+# Good: Deployment script with validation
+#!/bin/bash
+set -e  # Exit on any error
+
+# Validate configuration
+gcloud deployment-manager deployments describe $DEPLOYMENT_NAME || exit 1
+
+# Deploy with rollback capability
+gcloud deployment-manager deployments update $DEPLOYMENT_NAME \
+  --config=deployment.yaml \
+  --create-policy=CREATE_OR_ACQUIRE \
+  --delete-policy=DELETE
+
+# Verify deployment
+gcloud compute instances list --filter="labels.deployment=$DEPLOYMENT_NAME"
+```
+
+## 11. Error Handling and Logging
+
+### Implement proper error handling
+```bash
+# Good: Check command success and log errors
+if ! gcloud compute instances create my-instance; then
+  echo "ERROR: Failed to create instance" >&2
+  gcloud logging write my-app-log "Instance creation failed" --severity=ERROR
+  exit 1
+fi
+```
+
+## 12. Security Scanning
+
+### Regular security audits
+```bash
+# Good: Use Security Command Center
+gcloud scc sources list --organization=ORGANIZATION_ID
+
+# Good: Enable vulnerability scanning
+gcloud container images scan IMAGE_URL
+```
+
+## Common Anti-Patterns to Avoid
+
+1. **Hard-coding credentials** in scripts or configuration files
+2. **Using default service accounts** with excessive permissions
+3. **Not using resource labels** for organization and cost tracking
+4. **Ignoring resource quotas** and limits
+5. **Not implementing proper backup strategies**
+6. **Using overly permissive firewall rules**
+7. **Not monitoring resource usage** and costs
+8. **Mixing environments** in the same project
+9. **Not using infrastructure as code** for reproducible deployments
+10. **Ignoring security best practices** and compliance requirements
+
+## Quick Reference Commands
+
+```bash
+# Set up new project
+gcloud config set project PROJECT_ID
+gcloud services enable compute.googleapis.com
+
+# Create secure instance
+gcloud compute instances create secure-instance \
+  --image-family=debian-11 \
+  --image-project=debian-cloud \
+  --machine-type=e2-medium \
+  --boot-disk-size=10GB \
+  --boot-disk-type=pd-standard \
+  --tags=webserver \
+  --labels=env=prod,team=ops
+
+# Create firewall rule
+gcloud compute firewall-rules create allow-http \
+  --allow tcp:80,tcp:443 \
+  --source-ranges=0.0.0.0/0 \
+  --target-tags=webserver
+
+# Clean up resources
+gcloud compute instances delete INSTANCE_NAME --zone=ZONE --quiet
+gcloud compute firewall-rules delete RULE_NAME --quiet
+```
