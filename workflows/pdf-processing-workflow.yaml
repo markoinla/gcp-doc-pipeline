@@ -95,7 +95,7 @@ process_pdf_with_retry:
             headers:
               Content-Type: "application/json"
             body: ${function_payload}
-            timeout: 600
+            timeout: 540
           result: function_response
         retry:
           predicate: ${http.default_retry_predicate}
@@ -128,7 +128,7 @@ process_pdf_with_retry:
     
     - parse_success_response:
         assign:
-          - response_body: ${json.decode(function_response.body)}
+          - response_body: ${function_response.body}
     
     - check_success_status:
         switch:
@@ -138,7 +138,7 @@ process_pdf_with_retry:
     
     - function_error_response:
         assign:
-          - error_body: ${json.decode(function_response.body)}
+          - error_body: ${function_response.body}
     
     - raise_function_error:
         raise:

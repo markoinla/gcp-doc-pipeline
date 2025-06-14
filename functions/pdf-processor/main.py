@@ -130,9 +130,12 @@ def process_pdf_document(pdf_url, document_id, processor_id, project_id, locatio
         
         return {
             "document_id": document_id,
-            "status": "completed",
+            "status": "success",
             "uploaded_files": upload_result,
-            "patterns_found": processing_result['pattern_summary']['total_patterns'],
+            "items_found": processing_result['summary']['total_items'],
+            "unique_items": processing_result['summary']['unique_items'],
+            "patterns_found": processing_result['summary']['item_breakdown']['patterns'],
+            "words_found": processing_result['summary']['item_breakdown']['words'],
             "total_pages": processing_result['main_document']['total_pages'],
             "processing_time": str(processing_time)
         }
@@ -209,68 +212,176 @@ def create_combined_document(all_pages, combined_text, total_pages):
     return CombinedDocument(all_pages, combined_text)
 
 def extract_and_process_data(doc, document_id, pdf_url, start_time):
-    """Extract patterns with bounding boxes - no full text needed"""
+    """Extract patterns and words with search-optimized structure"""
     
-    print("Extracting patterns and processing data...")
+    print("Extracting patterns and words with search-optimized structure...")
     
-    # Extract patterns with bounding boxes from Document AI tokens
-    patterns = extract_patterns_with_context(doc)
+    # Extract both patterns and words with bounding boxes
+    items = extract_items_with_bounding_boxes(doc)
     
     # Calculate confidence scores
     avg_confidence = calculate_average_confidence(doc)
     
-    # Create pattern summary with counts
-    pattern_counts = {}
-    total_patterns = 0
-    pages_with_patterns = set()
+    # Create search indexes
+    search_indexes = create_search_indexes(items)
     
-    for pattern_type, instances in patterns.items():
-        pattern_counts[pattern_type] = len(instances)
-        total_patterns += len(instances)
-        for instance in instances:
-            pages_with_patterns.add(instance['page'])
+    # Generate statistics
+    statistics = generate_statistics(items)
     
-    # Create main results JSON - only patterns and metadata
+    # Count totals
+    total_items = sum(item["total_count"] for item in items.values())
+    unique_items = len(items)
+    pages_with_content = set()
+    
+    for item in items.values():
+        for location in item["locations"]:
+            pages_with_content.add(location["page"])
+    
+    # Create main search-optimized document
     main_document = {
         "document_id": document_id,
         "source_url": pdf_url,
         "processed_at": datetime.now().isoformat(),
         "total_pages": len(doc.pages),
-        "patterns": patterns,
         "processing_metadata": {
             "processing_time": str(datetime.now() - start_time),
             "ocr_confidence": avg_confidence,
-            "total_patterns": total_patterns,
-            "pages_with_patterns": sorted(list(pages_with_patterns))
-        }
+            "total_items": total_items,
+            "unique_items": unique_items,
+            "pages_with_content": sorted(list(pages_with_content))
+        },
+        "items": items,
+        "search_indexes": search_indexes,
+        "statistics": statistics
     }
     
-    # Create pattern summary JSON for quick lookup
-    pattern_summary = {
+    # Create simplified summary for quick overview
+    summary = {
         "document_id": document_id,
-        "pattern_counts": pattern_counts,
-        "total_patterns": total_patterns,
-        "pages_with_patterns": sorted(list(pages_with_patterns)),
-        "confidence_score": avg_confidence
+        "total_items": total_items,
+        "unique_items": unique_items,
+        "pages_with_content": len(pages_with_content),
+        "confidence_score": avg_confidence,
+        "item_breakdown": {
+            "patterns": statistics["item_counts_by_type"]["pattern"],
+            "words": statistics["item_counts_by_type"]["word"]
+        },
+        "top_categories": dict(list(statistics["items_by_category"].items())[:5])
     }
     
-    print(f"Extracted {total_patterns} patterns across {len(pages_with_patterns)} pages")
+    print(f"Extracted {total_items} total items ({unique_items} unique) across {len(pages_with_content)} pages")
     
     return {
         "main_document": main_document,
-        "pattern_summary": pattern_summary
+        "summary": summary
     }
 
-def extract_patterns_with_context(doc):
-    """Extract technical patterns with bounding boxes from Document AI tokens"""
-    patterns = {}
+def create_search_indexes(items):
+    """Create search indexes for efficient querying"""
+    by_page = {}
+    by_type = {"pattern": [], "word": []}
+    by_category = {}
+    
+    for item_key, item_data in items.items():
+        # Index by type
+        by_type[item_data["type"]].append(item_key)
+        
+        # Index by category
+        category = item_data["category"]
+        if category not in by_category:
+            by_category[category] = []
+        by_category[category].append(item_key)
+        
+        # Index by page
+        for location in item_data["locations"]:
+            page = str(location["page"])
+            if page not in by_page:
+                by_page[page] = []
+            if item_key not in by_page[page]:
+                by_page[page].append(item_key)
+    
+    return {
+        "by_page": by_page,
+        "by_type": by_type,
+        "by_category": by_category
+    }
+
+def generate_statistics(items):
+    """Generate statistics about the extracted items"""
+    
+    # Count by type
+    item_counts_by_type = {"pattern": 0, "word": 0}
+    
+    # Count by category
+    items_by_category = {}
+    
+    # Pattern type analysis
+    pattern_types = {}
+    
+    # Word frequency
+    word_frequency = {}
+    
+    # Page density
+    page_density = {}
+    
+    for item_key, item_data in items.items():
+        item_type = item_data["type"]
+        category = item_data["category"]
+        count = item_data["total_count"]
+        
+        # Count by type
+        item_counts_by_type[item_type] += count
+        
+        # Count by category
+        if category not in items_by_category:
+            items_by_category[category] = 0
+        items_by_category[category] += count
+        
+        # Pattern type analysis
+        if item_type == "pattern":
+            prefix = item_key.split('-')[0] if '-' in item_key else item_key[:2]
+            if prefix not in pattern_types:
+                pattern_types[prefix] = 0
+            pattern_types[prefix] += count
+        
+        # Word frequency (top words only)
+        if item_type == "word":
+            word_frequency[item_key] = count
+        
+        # Page density
+        for location in item_data["locations"]:
+            page = location["page"]
+            if page not in page_density:
+                page_density[page] = 0
+            page_density[page] += 1
+    
+    # Sort and limit results
+    items_by_category = dict(sorted(items_by_category.items(), key=lambda x: x[1], reverse=True))
+    pattern_types = dict(sorted(pattern_types.items(), key=lambda x: x[1], reverse=True))
+    word_frequency = dict(sorted(word_frequency.items(), key=lambda x: x[1], reverse=True)[:20])  # Top 20 words
+    pages_by_density = [{"page": page, "item_count": count} for page, count in sorted(page_density.items(), key=lambda x: x[1], reverse=True)]
+    
+    return {
+        "item_counts_by_type": item_counts_by_type,
+        "items_by_category": items_by_category,
+        "pattern_types": pattern_types,
+        "word_frequency": word_frequency,
+        "pages_by_density": pages_by_density
+    }
+
+def extract_items_with_bounding_boxes(doc):
+    """Extract both patterns and words with bounding boxes from Document AI tokens"""
+    items = {}
     
     # Define pattern regex - matching PT-1, PT1, M1, M-1, etc.
     pattern_regex = re.compile(r'\b(PT-?\d+|M-?\d+|[A-Z]-?\d+)\b', re.IGNORECASE)
     
-    print("Extracting patterns from Document AI tokens...")
+    # Define word regex - meaningful words (3+ chars, not purely numeric)
+    word_regex = re.compile(r'\b[A-Za-z][A-Za-z\s]{2,}\b')
     
-    # Extract patterns from each page's tokens
+    print("Extracting patterns and words from Document AI tokens...")
+    
+    # Extract from each page's tokens
     for page_num, page in enumerate(doc.pages, 1):
         if hasattr(page, 'tokens'):
             for token in page.tokens:
@@ -283,41 +394,69 @@ def extract_patterns_with_context(doc):
                         end_idx = getattr(segment, 'end_index', len(doc.text))
                         token_text += doc.text[start_idx:end_idx]
                 
-                # Check if token matches our pattern
+                if not token_text.strip():
+                    continue
+                
+                # Extract bounding box and confidence
+                bounding_box = None
+                confidence = 0.95
+                
+                if hasattr(token, 'layout') and hasattr(token.layout, 'bounding_poly'):
+                    vertices = []
+                    if hasattr(token.layout.bounding_poly, 'vertices'):
+                        for vertex in token.layout.bounding_poly.vertices:
+                            vertices.append({
+                                "x": getattr(vertex, 'x', 0),
+                                "y": getattr(vertex, 'y', 0)
+                            })
+                        bounding_box = {
+                            "vertices": vertices
+                        }
+                
+                if hasattr(token, 'layout') and hasattr(token.layout, 'confidence'):
+                    confidence = token.layout.confidence
+                
+                # Check if token is a pattern
                 if pattern_regex.match(token_text):
-                    pattern_text = token_text.upper().strip()
-                    
-                    if pattern_text not in patterns:
-                        patterns[pattern_text] = []
-                    
-                    # Extract bounding box
-                    bounding_box = None
-                    confidence = 0.95
-                    
-                    if hasattr(token, 'layout') and hasattr(token.layout, 'bounding_poly'):
-                        vertices = []
-                        if hasattr(token.layout.bounding_poly, 'vertices'):
-                            for vertex in token.layout.bounding_poly.vertices:
-                                vertices.append({
-                                    "x": getattr(vertex, 'x', 0),
-                                    "y": getattr(vertex, 'y', 0)
-                                })
-                            bounding_box = {
-                                "vertices": vertices
-                            }
-                    
-                    # Get confidence if available
-                    if hasattr(token, 'layout') and hasattr(token.layout, 'confidence'):
-                        confidence = token.layout.confidence
-                    
-                    patterns[pattern_text].append({
+                    item_key = token_text.upper().strip()
+                    item_type = "pattern"
+                    category = categorize_pattern(item_key)
+                
+                # Check if token is a meaningful word
+                elif word_regex.match(token_text) and len(token_text.strip()) >= 3:
+                    item_key = token_text.lower().strip()
+                    item_type = "word"
+                    category = categorize_word(item_key)
+                else:
+                    continue
+                
+                # Add to items collection
+                if item_key not in items:
+                    items[item_key] = {
+                        "type": item_type,
+                        "category": category,
+                        "total_count": 0,
+                        "locations": []
+                    }
+                
+                # Check for duplicates on same page
+                existing_on_page = False
+                for existing_loc in items[item_key]["locations"]:
+                    if existing_loc["page"] == page_num:
+                        # If very close coordinates, consider it duplicate
+                        if bounding_box and existing_loc.get("bounding_box"):
+                            existing_on_page = True
+                            break
+                
+                if not existing_on_page:
+                    items[item_key]["locations"].append({
                         "page": page_num,
-                        "text": token_text.strip(),
-                        "confidence": confidence,
-                        "bounding_box": bounding_box
+                        "bounding_box": bounding_box,
+                        "confidence": confidence
                     })
+                    items[item_key]["total_count"] += 1
         
-        # Also check blocks for patterns (fallback)
+        # Also check blocks for additional patterns/words (fallback)
         if hasattr(page, 'blocks'):
             for block in page.blocks:
                 if hasattr(block, 'layout') and hasattr(block.layout, 'text_anchor'):
@@ -328,51 +467,90 @@ def extract_patterns_with_context(doc):
                         end_idx = getattr(segment, 'end_index', len(doc.text))
                         block_text += doc.text[start_idx:end_idx]
                     
+                    # Extract bounding box from block
+                    block_bounding_box = None
+                    block_confidence = 0.85
+                    
+                    if hasattr(block, 'layout') and hasattr(block.layout, 'bounding_poly'):
+                        vertices = []
+                        if hasattr(block.layout.bounding_poly, 'vertices'):
+                            for vertex in block.layout.bounding_poly.vertices:
+                                vertices.append({
+                                    "x": getattr(vertex, 'x', 0),
+                                    "y": getattr(vertex, 'y', 0)
+                                })
+                            block_bounding_box = {
+                                "vertices": vertices
+                            }
+                    
+                    if hasattr(block, 'layout') and hasattr(block.layout, 'confidence'):
+                        block_confidence = block.layout.confidence
+                    
                     # Find patterns in block text
-                    matches = pattern_regex.finditer(block_text)
-                    for match in matches:
-                        pattern_text = match.group().upper()
+                    pattern_matches = pattern_regex.finditer(block_text)
+                    for match in pattern_matches:
+                        item_key = match.group().upper().strip()
                         
-                        if pattern_text not in patterns:
-                            patterns[pattern_text] = []
+                        if item_key not in items:
+                            items[item_key] = {
+                                "type": "pattern",
+                                "category": categorize_pattern(item_key),
+                                "total_count": 0,
+                                "locations": []
+                            }
                         
-                        # Extract bounding box from block
-                        bounding_box = None
-                        confidence = 0.90
+                        # Check if we already have this on this page
+                        existing_on_page = any(loc["page"] == page_num for loc in items[item_key]["locations"])
                         
-                        if hasattr(block, 'layout') and hasattr(block.layout, 'bounding_poly'):
-                            vertices = []
-                            if hasattr(block.layout.bounding_poly, 'vertices'):
-                                for vertex in block.layout.bounding_poly.vertices:
-                                    vertices.append({
-                                        "x": getattr(vertex, 'x', 0),
-                                        "y": getattr(vertex, 'y', 0)
-                                    })
-                                bounding_box = {
-                                    "vertices": vertices
-                                }
-                        
-                        # Get confidence if available
-                        if hasattr(block, 'layout') and hasattr(block.layout, 'confidence'):
-                            confidence = block.layout.confidence
-                        
-                        # Check if we already have this exact pattern on this page
-                        existing_pattern = False
-                        for existing in patterns[pattern_text]:
-                            if existing["page"] == page_num and existing["text"] == match.group().strip():
-                                existing_pattern = True
-                                break
-                        
-                        if not existing_pattern:
-                            patterns[pattern_text].append({
+                        if not existing_on_page:
+                            items[item_key]["locations"].append({
                                 "page": page_num,
-                                "text": match.group().strip(),
-                                "confidence": confidence,
-                                "bounding_box": bounding_box
+                                "bounding_box": block_bounding_box,
+                                "confidence": block_confidence
                             })
+                            items[item_key]["total_count"] += 1
     
-    print(f"Found patterns: {dict((k, len(v)) for k, v in patterns.items())}")
-    return patterns
+    print(f"Found {len(items)} unique items")
+    pattern_count = sum(1 for item in items.values() if item["type"] == "pattern")
+    word_count = sum(1 for item in items.values() if item["type"] == "word")
+    print(f"Patterns: {pattern_count}, Words: {word_count}")
+    
+    return items
+
+def categorize_pattern(pattern_text):
+    """Categorize technical patterns"""
+    if pattern_text.startswith('PT'):
+        return "plumbing_technical"
+    elif pattern_text.startswith('M'):
+        return "mechanical"
+    elif pattern_text.startswith('E'):
+        return "electrical"
+    elif pattern_text.startswith('A'):
+        return "architectural"
+    elif pattern_text.startswith('S'):
+        return "structural"
+    else:
+        return "technical_code"
+
+def categorize_word(word_text):
+    """Categorize words by type"""
+    architectural_elements = {'door', 'window', 'wall', 'roof', 'floor', 'ceiling', 'beam', 'column'}
+    room_types = {'bathroom', 'kitchen', 'bedroom', 'office', 'lobby', 'hallway', 'closet', 'storage'}
+    materials = {'concrete', 'steel', 'wood', 'brick', 'glass', 'aluminum', 'copper'}
+    dimensions = {'length', 'width', 'height', 'depth', 'diameter', 'thickness'}
+    
+    word_lower = word_text.lower()
+    
+    if word_lower in architectural_elements:
+        return "architectural_element"
+    elif word_lower in room_types:
+        return "room_type"
+    elif word_lower in materials:
+        return "material"
+    elif word_lower in dimensions:
+        return "dimension"
+    else:
+        return "general_text"
 
 def upload_to_r2(processing_result, r2_config, document_id):
     """Upload all JSON files directly to R2"""
@@ -425,16 +603,16 @@ def upload_to_r2(processing_result, r2_config, document_id):
     uploaded_files['main_document'] = main_key
     print(f"Uploaded main document: {main_key}")
     
-    # Upload pattern summary
-    pattern_key = f"patterns/{document_id}.json"
+    # Upload summary
+    summary_key = f"summaries/{document_id}.json"
     r2_client.put_object(
         Bucket=bucket_name,
-        Key=pattern_key,
-        Body=json.dumps(processing_result['pattern_summary'], indent=2),
+        Key=summary_key,
+        Body=json.dumps(processing_result['summary'], indent=2),
         ContentType='application/json'
     )
-    uploaded_files['pattern_summary'] = pattern_key
-    print(f"Uploaded pattern summary: {pattern_key}")
+    uploaded_files['summary'] = summary_key
+    print(f"Uploaded summary: {summary_key}")
     
     return uploaded_files
 
