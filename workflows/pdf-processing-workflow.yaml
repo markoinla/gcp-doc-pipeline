@@ -1,0 +1,185 @@
+# Google Cloud Workflow for PDF Document Processing
+# This workflow orchestrates the entire PDF processing pipeline
+
+main:
+  params: [input]
+  steps:
+    - validate_input:
+        call: validate_request
+        args:
+          request: ${input}
+        result: validated_input
+    
+    - generate_document_id:
+        assign:
+          - document_id: ${"doc_" + string(int(sys.now()))}
+          - processing_start_time: ${sys.now()}
+    
+    - log_start:
+        call: sys.log
+        args:
+          severity: INFO
+          text: '${"Starting PDF processing for document: " + document_id + " from URL: " + validated_input.pdfUrl}'
+    
+    - call_pdf_processor:
+        call: process_pdf_with_retry
+        args:
+          document_id: ${document_id}
+          pdf_url: ${validated_input.pdfUrl}
+          processor_config: ${validated_input.processorConfig}
+          r2_config: ${validated_input.r2Config}
+          callback_url: ${validated_input.callbackUrl}
+        result: processing_result
+    
+    - log_success:
+        call: sys.log
+        args:
+          severity: INFO
+          text: '${"Successfully processed document: " + document_id + " in " + string(sys.now() - processing_start_time) + " seconds"}'
+    
+    - return_success:
+        return:
+          status: "success"
+          document_id: ${document_id}
+          processing_time: ${sys.now() - processing_start_time}
+          result: ${processing_result}
+
+# Input validation subworkflow
+validate_request:
+  params: [request]
+  steps:
+    - check_required_fields:
+        switch:
+          - condition: ${"pdfUrl" in request and "r2Config" in request}
+            next: validate_pdf_url
+        next: missing_fields_error
+    
+    - validate_pdf_url:
+        switch:
+          - condition: ${text.match_regex(request.pdfUrl, "^https?://.*\\.pdf$")}
+            next: set_defaults
+        next: invalid_url_error
+    
+    - set_defaults:
+        assign:
+          - validated_request:
+              pdfUrl: ${request.pdfUrl}
+              r2Config: ${request.r2Config}
+              callbackUrl: ${default(request.callbackUrl, "")}
+              processorConfig:
+                processorId: ${default(request.processorId, "fa7abbc0ea6541c5")}
+                projectId: ${default(request.projectId, "ladders-doc-pipeline-462921")}
+                location: ${default(request.location, "us")}
+    
+    - return_validated:
+        return: ${validated_request}
+    
+    - missing_fields_error:
+        raise:
+          code: 400
+          message: "Missing required fields: pdfUrl and r2Config are required"
+    
+    - invalid_url_error:
+        raise:
+          code: 400
+          message: "Invalid PDF URL: URL must be HTTPS and end with .pdf"
+
+# PDF processing with retry logic
+process_pdf_with_retry:
+  params: [document_id, pdf_url, processor_config, r2_config, callback_url]
+  steps:
+    - prepare_function_payload:
+        assign:
+          - function_payload:
+              documentId: ${document_id}
+              pdfUrl: ${pdf_url}
+              processorId: ${processor_config.processorId}
+              projectId: ${processor_config.projectId}
+              location: ${processor_config.location}
+              r2Config: ${r2_config}
+              callbackUrl: ${callback_url}
+    
+    - call_function_with_retry:
+        try:
+          call: http.post
+          args:
+            url: "https://us-central1-ladders-doc-pipeline-462921.cloudfunctions.net/pdf-processor"
+            headers:
+              Content-Type: "application/json"
+            body: ${function_payload}
+            timeout: 600
+          result: function_response
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 5
+            max_delay: 120
+            multiplier: 2
+        except:
+          as: e
+          steps:
+            - log_error:
+                call: sys.log
+                args:
+                  severity: ERROR
+                  text: '${"PDF processing failed for document " + document_id + ": " + e.message}'
+            - handle_processing_error:
+                switch:
+                  - condition: ${e.code == 408 or e.code == 504}
+                    next: timeout_error
+                  - condition: ${e.code >= 500}
+                    next: server_error
+                  - condition: ${e.code >= 400}
+                    next: client_error
+                next: unknown_error
+    
+    - validate_function_response:
+        switch:
+          - condition: ${function_response.code == 200}
+            next: parse_success_response
+        next: function_error_response
+    
+    - parse_success_response:
+        assign:
+          - response_body: ${json.decode(function_response.body)}
+    
+    - check_success_status:
+        switch:
+          - condition: ${response_body.status == "success"}
+            return: ${response_body}
+        next: processing_failed_error
+    
+    - function_error_response:
+        assign:
+          - error_body: ${json.decode(function_response.body)}
+    
+    - raise_function_error:
+        raise:
+          code: ${function_response.code}
+          message: '${"Function returned error: " + error_body.error}'
+    
+    - processing_failed_error:
+        raise:
+          code: 500
+          message: "PDF processing completed but returned failure status"
+    
+    - timeout_error:
+        raise:
+          code: 408
+          message: "PDF processing timed out - document may be too large or complex"
+    
+    - server_error:
+        raise:
+          code: 500
+          message: "Server error during PDF processing - please try again"
+    
+    - client_error:
+        raise:
+          code: 400
+          message: "Invalid request parameters for PDF processing"
+    
+    - unknown_error:
+        raise:
+          code: 500
+          message: "Unknown error during PDF processing" 
