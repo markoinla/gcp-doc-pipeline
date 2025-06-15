@@ -589,7 +589,7 @@ def upload_to_r2(processing_result, r2_config, document_id):
         region_name='auto'
     )
     
-    bucket_name = r2_config['bucket']
+    bucket_name = r2_config['bucketName']
     uploaded_files = {}
     
     # Upload main document
