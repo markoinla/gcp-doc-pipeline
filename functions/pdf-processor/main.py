@@ -519,8 +519,11 @@ def extract_items_with_bounding_boxes(doc):
 
 def categorize_pattern(pattern_text):
     """Categorize technical patterns"""
-    if pattern_text.startswith('PT'):
-        return "plumbing_technical"
+    # Paint patterns: PT-1, PT1, P1, P-1, etc.
+    if (pattern_text.startswith('PT') or 
+        (pattern_text.startswith('P') and len(pattern_text) >= 2 and 
+         (pattern_text[1].isdigit() or pattern_text[1] == '-'))):
+        return "painting"
     elif pattern_text.startswith('M'):
         return "mechanical"
     elif pattern_text.startswith('E'):
