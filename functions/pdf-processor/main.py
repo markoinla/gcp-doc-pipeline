@@ -25,38 +25,55 @@ def process_pdf(request):
         if not request_json:
             return {"status": "error", "error": "No JSON body provided"}, 400
             
-        required_fields = ['pdfUrl', 'callbackUrl', 'r2Config']
+        required_fields = ['pdfUrl', 'r2Config']
         for field in required_fields:
             if field not in request_json:
                 return {"status": "error", "error": f"Missing required field: {field}"}, 400
         
         pdf_url = request_json['pdfUrl']
-        callback_url = request_json['callbackUrl']
+        callback_url = request_json.get('callbackUrl')  # Optional (legacy)
+        webhook_url = request_json.get('webhookUrl')    # New webhook parameter
         r2_config = request_json['r2Config']
+        
+        # New parameters for project organization
+        project_id = request_json.get('projectID')
+        project_file_id = request_json.get('projectFileID')
+        
+        # Use projectFileID as document_id if provided, otherwise generate one
+        if project_file_id:
+            document_id = project_file_id
+        else:
+            document_id = f"doc_{int(time.time())}"
         
         # Use our configured processor
         processor_id = "fa7abbc0ea6541c5"
         location = "us"
-        project_id = "ladders-doc-pipeline-462921"
-        
-        # Generate document ID
-        document_id = str(uuid.uuid4())
+        gcp_project_id = "ladders-doc-pipeline-462921"
         
         print(f"Starting PDF processing for document ID: {document_id}")
         print(f"PDF URL: {pdf_url}")
+        if project_id:
+            print(f"App Project ID: {project_id}")
+        if project_file_id:
+            print(f"App Project File ID: {project_file_id}")
+        if webhook_url:
+            print(f"Webhook URL: {webhook_url}")
         
         # Process PDF
         result = process_pdf_document(
             pdf_url=pdf_url,
             document_id=document_id,
             processor_id=processor_id,
-            project_id=project_id,
+            project_id=gcp_project_id,
             location=location,
-            r2_config=r2_config
+            r2_config=r2_config,
+            app_project_id=project_id,
+            webhook_url=webhook_url
         )
         
-        # Send callback
-        send_callback(callback_url, result)
+        # Send legacy callback if provided
+        if callback_url:
+            send_callback(callback_url, result)
         
         return {"status": "success", "document_id": document_id, "result": result}
         
@@ -64,7 +81,7 @@ def process_pdf(request):
         print(f"Error in process_pdf: {str(e)}")
         return {"status": "error", "error": str(e)}, 500
 
-def process_pdf_document(pdf_url, document_id, processor_id, project_id, location, r2_config):
+def process_pdf_document(pdf_url, document_id, processor_id, project_id, location, r2_config, app_project_id=None, webhook_url=None):
     """Process PDF by chunking into 15-page segments for Document AI"""
     start_time = datetime.now()
     
@@ -124,11 +141,11 @@ def process_pdf_document(pdf_url, document_id, processor_id, project_id, locatio
         processing_result = extract_and_process_data(combined_doc, document_id, pdf_url, start_time)
         
         # Upload to R2
-        upload_result = upload_to_r2(processing_result, r2_config, document_id)
+        upload_result = upload_to_r2(processing_result, r2_config, document_id, app_project_id)
         
         processing_time = datetime.now() - start_time
         
-        return {
+        result = {
             "document_id": document_id,
             "status": "success",
             "uploaded_files": upload_result,
@@ -139,6 +156,12 @@ def process_pdf_document(pdf_url, document_id, processor_id, project_id, locatio
             "total_pages": processing_result['main_document']['total_pages'],
             "processing_time": str(processing_time)
         }
+        
+        # Send webhook notification if provided
+        if webhook_url:
+            send_webhook_notification(webhook_url, result, r2_config, app_project_id)
+        
+        return result
         
     finally:
         # Clean up temp file
@@ -555,7 +578,7 @@ def categorize_word(word_text):
     else:
         return "general_text"
 
-def upload_to_r2(processing_result, r2_config, document_id):
+def upload_to_r2(processing_result, r2_config, document_id, app_project_id=None):
     """Upload all JSON files directly to R2"""
     print("Uploading results to R2...")
     
@@ -595,8 +618,20 @@ def upload_to_r2(processing_result, r2_config, document_id):
     bucket_name = r2_config['bucketName']
     uploaded_files = {}
     
+    # Organize files by project if provided
+    if app_project_id:
+        base_path = f"projects/{app_project_id}"
+        print(f"Organizing files under project: {app_project_id}")
+    else:
+        base_path = ""
+        print("Using default file organization")
+    
     # Upload main document
-    main_key = f"documents/{document_id}.json"
+    if base_path:
+        main_key = f"{base_path}/documents/{document_id}.json"
+    else:
+        main_key = f"documents/{document_id}.json"
+        
     r2_client.put_object(
         Bucket=bucket_name,
         Key=main_key,
@@ -607,7 +642,11 @@ def upload_to_r2(processing_result, r2_config, document_id):
     print(f"Uploaded main document: {main_key}")
     
     # Upload summary
-    summary_key = f"summaries/{document_id}.json"
+    if base_path:
+        summary_key = f"{base_path}/summaries/{document_id}.json"
+    else:
+        summary_key = f"summaries/{document_id}.json"
+        
     r2_client.put_object(
         Bucket=bucket_name,
         Key=summary_key,
@@ -658,7 +697,7 @@ def calculate_average_confidence(doc):
     return sum(confidences) / len(confidences) if confidences else 0.95
 
 def send_callback(callback_url, result):
-    """Send callback to Cloudflare Worker"""
+    """Send callback to Cloudflare Worker (legacy)"""
     try:
         print(f"Sending callback to: {callback_url}")
         response = requests.post(callback_url, json=result, timeout=30)
@@ -666,4 +705,60 @@ def send_callback(callback_url, result):
         print("Callback sent successfully")
     except Exception as e:
         print(f"Callback failed: {e}")
-        # Don't fail the whole operation if callback fails 
+        # Don't fail the whole operation if callback fails
+
+def send_webhook_notification(webhook_url, processing_result, r2_config, app_project_id=None):
+    """Send webhook notification with processing results and file URLs"""
+    try:
+        print(f"Sending webhook notification to: {webhook_url}")
+        
+        # Build the base URL for R2 files
+        r2_endpoint = r2_config.get('endpoint', '')
+        bucket_name = r2_config.get('bucketName', '')
+        
+        # Extract the domain from the endpoint (remove protocol and path)
+        if r2_endpoint.startswith('https://'):
+            r2_domain = r2_endpoint.replace('https://', '').split('/')[0]
+        else:
+            r2_domain = r2_endpoint.split('/')[0]
+        
+        # Build public URLs for the uploaded files
+        uploaded_files = processing_result.get('uploaded_files', {})
+        file_urls = {}
+        
+        for file_type, file_path in uploaded_files.items():
+            # Build public URL: https://pub-{account_hash}.r2.dev/{file_path}
+            # We'll use a generic public URL format - adjust based on your R2 setup
+            public_url = f"https://pub-592c678931664039950f4a0846d0d9d1.r2.dev/{file_path}"
+            file_urls[file_type] = public_url
+        
+        # Create webhook payload
+        webhook_payload = {
+            "event": "pdf_processing_complete",
+            "timestamp": datetime.now().isoformat(),
+            "projectID": app_project_id,
+            "projectFileID": processing_result.get('document_id'),
+            "status": processing_result.get('status'),
+            "processing_stats": {
+                "total_pages": processing_result.get('total_pages'),
+                "items_found": processing_result.get('items_found'),
+                "unique_items": processing_result.get('unique_items'),
+                "patterns_found": processing_result.get('patterns_found'),
+                "words_found": processing_result.get('words_found'),
+                "processing_time": processing_result.get('processing_time')
+            },
+            "files": {
+                "document_url": file_urls.get('main_document'),
+                "summary_url": file_urls.get('summary')
+            },
+            "r2_paths": uploaded_files
+        }
+        
+        # Send webhook
+        response = requests.post(webhook_url, json=webhook_payload, timeout=30)
+        response.raise_for_status()
+        print("Webhook notification sent successfully")
+        
+    except Exception as e:
+        print(f"Webhook notification failed: {e}")
+        # Don't fail the whole operation if webhook fails 

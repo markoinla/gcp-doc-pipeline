@@ -10,7 +10,19 @@ main:
           request: ${input}
         result: validated_input
     
-    - generate_document_id:
+    - check_project_file_id:
+        switch:
+          - condition: ${validated_input.projectFileID != ""}
+            next: use_project_file_id
+        next: generate_new_id
+    
+    - use_project_file_id:
+        assign:
+          - document_id: ${validated_input.projectFileID}
+          - processing_start_time: ${sys.now()}
+        next: call_pdf_processor
+    
+    - generate_new_id:
         assign:
           - document_id: ${"doc_" + string(int(sys.now()))}
           - processing_start_time: ${sys.now()}
@@ -23,6 +35,9 @@ main:
           processor_config: ${validated_input.processorConfig}
           r2_config: ${validated_input.r2Config}
           callback_url: ${validated_input.callbackUrl}
+          webhook_url: ${validated_input.webhookUrl}
+          project_id: ${validated_input.projectID}
+          project_file_id: ${validated_input.projectFileID}
         result: processing_result
     
     - return_success:
@@ -54,10 +69,37 @@ validate_request:
               pdfUrl: ${request.pdfUrl}
               r2Config: ${request.r2Config}
               callbackUrl: ""
+              webhookUrl: ""
+              projectID: ""
+              projectFileID: ""
               processorConfig:
                 processorId: "fa7abbc0ea6541c5"
                 projectId: "ladders-doc-pipeline-462921"
                 location: "us"
+    
+    - set_optional_callback:
+        switch:
+          - condition: ${"callbackUrl" in request}
+            assign:
+              - validated_request.callbackUrl: ${request.callbackUrl}
+    
+    - set_optional_webhook:
+        switch:
+          - condition: ${"webhookUrl" in request}
+            assign:
+              - validated_request.webhookUrl: ${request.webhookUrl}
+    
+    - set_optional_project_id:
+        switch:
+          - condition: ${"projectID" in request}
+            assign:
+              - validated_request.projectID: ${request.projectID}
+    
+    - set_optional_project_file_id:
+        switch:
+          - condition: ${"projectFileID" in request}
+            assign:
+              - validated_request.projectFileID: ${request.projectFileID}
     
     - return_validated:
         return: ${validated_request}
@@ -74,18 +116,17 @@ validate_request:
 
 # PDF processing with retry logic
 process_pdf_with_retry:
-  params: [document_id, pdf_url, processor_config, r2_config, callback_url]
+  params: [document_id, pdf_url, processor_config, r2_config, callback_url, webhook_url, project_id, project_file_id]
   steps:
     - prepare_function_payload:
         assign:
           - function_payload:
-              documentId: ${document_id}
               pdfUrl: ${pdf_url}
-              processorId: ${processor_config.processorId}
-              projectId: ${processor_config.projectId}
-              location: ${processor_config.location}
               r2Config: ${r2_config}
               callbackUrl: ${callback_url}
+              webhookUrl: ${webhook_url}
+              projectID: ${project_id}
+              projectFileID: ${project_file_id}
     
     - call_function_with_retry:
         try:
