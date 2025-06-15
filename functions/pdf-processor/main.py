@@ -13,6 +13,8 @@ import requests
 import functions_framework
 import PyPDF2
 import io
+from urllib.parse import urlparse
+import time
 
 @functions_framework.http
 def process_pdf(request):
@@ -91,6 +93,10 @@ def process_pdf_document(pdf_url, document_id, processor_id, project_id, locatio
     temp_pdf_path = download_pdf_to_temp(pdf_url)
     
     try:
+        # Extract PDF metadata first
+        pdf_metadata = extract_pdf_metadata(temp_pdf_path, pdf_url)
+        print(f"Extracted PDF metadata: {pdf_metadata['file_info']['filename']}")
+        
         # Check PDF page count and split if necessary
         with open(temp_pdf_path, 'rb') as pdf_file:
             pdf_reader = PyPDF2.PdfReader(pdf_file)
@@ -138,7 +144,7 @@ def process_pdf_document(pdf_url, document_id, processor_id, project_id, locatio
         print(f"Combined document has {len(all_pages)} pages")
         
         # Extract and process data
-        processing_result = extract_and_process_data(combined_doc, document_id, pdf_url, start_time)
+        processing_result = extract_and_process_data(combined_doc, document_id, pdf_url, start_time, pdf_metadata)
         
         # Upload to R2
         upload_result = upload_to_r2(processing_result, r2_config, document_id, app_project_id)
@@ -234,7 +240,7 @@ def create_combined_document(all_pages, combined_text, total_pages):
     
     return CombinedDocument(all_pages, combined_text)
 
-def extract_and_process_data(doc, document_id, pdf_url, start_time):
+def extract_and_process_data(doc, document_id, pdf_url, start_time, pdf_metadata):
     """Extract patterns and words with search-optimized structure"""
     
     print("Extracting patterns and words with search-optimized structure...")
@@ -244,6 +250,9 @@ def extract_and_process_data(doc, document_id, pdf_url, start_time):
     
     # Calculate confidence scores
     avg_confidence = calculate_average_confidence(doc)
+    
+    # Extract page-level metadata
+    pages_metadata = extract_page_metadata(doc)
     
     # Create search indexes
     search_indexes = create_search_indexes(items)
@@ -266,6 +275,8 @@ def extract_and_process_data(doc, document_id, pdf_url, start_time):
         "source_url": pdf_url,
         "processed_at": datetime.now().isoformat(),
         "total_pages": len(doc.pages),
+        "document_metadata": pdf_metadata,
+        "pages_metadata": pages_metadata,
         "processing_metadata": {
             "processing_time": str(datetime.now() - start_time),
             "ocr_confidence": avg_confidence,
@@ -285,6 +296,12 @@ def extract_and_process_data(doc, document_id, pdf_url, start_time):
         "unique_items": unique_items,
         "pages_with_content": len(pages_with_content),
         "confidence_score": avg_confidence,
+        "document_info": {
+            "filename": pdf_metadata["file_info"]["filename"],
+            "title": pdf_metadata["document_info"].get("title"),
+            "total_pages": pdf_metadata["file_info"]["total_pages"],
+            "file_size_bytes": pdf_metadata["file_info"]["file_size_bytes"]
+        },
         "item_breakdown": {
             "patterns": statistics["item_counts_by_type"]["pattern"],
             "words": statistics["item_counts_by_type"]["word"]
@@ -695,6 +712,144 @@ def calculate_average_confidence(doc):
                     confidences.append(paragraph.confidence)
     
     return sum(confidences) / len(confidences) if confidences else 0.95
+
+def extract_pdf_metadata(pdf_path, pdf_url):
+    """Extract comprehensive PDF metadata using PyPDF2"""
+    try:
+        with open(pdf_path, 'rb') as pdf_file:
+            pdf_reader = PyPDF2.PdfReader(pdf_file)
+            
+            # Get basic document info
+            metadata = {
+                "file_info": {
+                    "filename": os.path.basename(urlparse(pdf_url).path) or "unknown.pdf",
+                    "source_url": pdf_url,
+                    "file_size_bytes": os.path.getsize(pdf_path),
+                    "total_pages": len(pdf_reader.pages)
+                },
+                "document_info": {},
+                "security_info": {
+                    "is_encrypted": pdf_reader.is_encrypted,
+                    "metadata_encrypted": False
+                }
+            }
+            
+            # Extract document metadata if available
+            if pdf_reader.metadata:
+                doc_info = pdf_reader.metadata
+                metadata["document_info"] = {
+                    "title": str(doc_info.get('/Title', '')).strip() if doc_info.get('/Title') else None,
+                    "author": str(doc_info.get('/Author', '')).strip() if doc_info.get('/Author') else None,
+                    "subject": str(doc_info.get('/Subject', '')).strip() if doc_info.get('/Subject') else None,
+                    "creator": str(doc_info.get('/Creator', '')).strip() if doc_info.get('/Creator') else None,
+                    "producer": str(doc_info.get('/Producer', '')).strip() if doc_info.get('/Producer') else None,
+                    "creation_date": str(doc_info.get('/CreationDate', '')).strip() if doc_info.get('/CreationDate') else None,
+                    "modification_date": str(doc_info.get('/ModDate', '')).strip() if doc_info.get('/ModDate') else None,
+                    "keywords": str(doc_info.get('/Keywords', '')).strip() if doc_info.get('/Keywords') else None
+                }
+                
+                # Clean up empty values
+                metadata["document_info"] = {k: v for k, v in metadata["document_info"].items() if v}
+            
+            return metadata
+            
+    except Exception as e:
+        print(f"Error extracting PDF metadata: {str(e)}")
+        return {
+            "file_info": {
+                "filename": os.path.basename(urlparse(pdf_url).path) or "unknown.pdf",
+                "source_url": pdf_url,
+                "file_size_bytes": 0,
+                "total_pages": 0
+            },
+            "document_info": {},
+            "security_info": {
+                "is_encrypted": False,
+                "metadata_encrypted": False
+            },
+            "extraction_error": str(e)
+        }
+
+def extract_page_metadata(doc):
+    """Extract page-level metadata from Document AI results"""
+    pages_metadata = []
+    
+    for page_num, page in enumerate(doc.pages, 1):
+        page_meta = {
+            "page_number": page_num,
+            "dimensions": {},
+            "layout_info": {},
+            "content_stats": {}
+        }
+        
+        # Extract page dimensions from Document AI
+        if hasattr(page, 'dimension'):
+            page_meta["dimensions"] = {
+                "width": page.dimension.width,
+                "height": page.dimension.height,
+                "unit": page.dimension.unit if hasattr(page.dimension, 'unit') else "pixels"
+            }
+        
+        # Extract layout information
+        if hasattr(page, 'layout'):
+            layout = page.layout
+            if hasattr(layout, 'bounding_poly') and layout.bounding_poly.vertices:
+                vertices = layout.bounding_poly.vertices
+                page_meta["layout_info"]["content_bounds"] = {
+                    "top_left": {"x": vertices[0].x, "y": vertices[0].y},
+                    "top_right": {"x": vertices[1].x, "y": vertices[1].y},
+                    "bottom_right": {"x": vertices[2].x, "y": vertices[2].y},
+                    "bottom_left": {"x": vertices[3].x, "y": vertices[3].y}
+                }
+            
+            if hasattr(layout, 'orientation'):
+                page_meta["layout_info"]["orientation"] = layout.orientation
+        
+        # Count content elements
+        content_stats = {
+            "tokens": 0,
+            "paragraphs": 0,
+            "lines": 0,
+            "blocks": 0,
+            "tables": 0,
+            "form_fields": 0
+        }
+        
+        # Count tokens
+        if hasattr(page, 'tokens'):
+            content_stats["tokens"] = len(page.tokens)
+        
+        # Count paragraphs
+        if hasattr(page, 'paragraphs'):
+            content_stats["paragraphs"] = len(page.paragraphs)
+        
+        # Count lines
+        if hasattr(page, 'lines'):
+            content_stats["lines"] = len(page.lines)
+        
+        # Count blocks
+        if hasattr(page, 'blocks'):
+            content_stats["blocks"] = len(page.blocks)
+        
+        # Count tables
+        if hasattr(page, 'tables'):
+            content_stats["tables"] = len(page.tables)
+        
+        # Count form fields
+        if hasattr(page, 'form_fields'):
+            content_stats["form_fields"] = len(page.form_fields)
+        
+        page_meta["content_stats"] = content_stats
+        
+        # Calculate text density (characters per square unit)
+        if hasattr(page, 'dimension') and content_stats["tokens"] > 0:
+            area = page.dimension.width * page.dimension.height
+            if area > 0:
+                page_meta["text_density"] = content_stats["tokens"] / area
+        
+        pages_metadata.append(page_meta)
+    
+    return pages_metadata
 
 def send_callback(callback_url, result):
     """Send callback to Cloudflare Worker (legacy)"""
