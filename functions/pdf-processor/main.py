@@ -9,6 +9,7 @@ from botocore.config import Config
 from google.cloud import secretmanager
 from google.cloud import storage
 from google.cloud import documentai
+from google.cloud import vision
 import requests
 import functions_framework
 import PyPDF2
@@ -143,8 +144,19 @@ def process_pdf_document(pdf_url, document_id, processor_id, project_id, locatio
         
         print(f"Combined document has {len(all_pages)} pages")
         
+        # Save raw text extraction for debugging
+        text_analysis = save_raw_text_extraction(combined_doc, document_id, r2_config)
+        
+        # If we detected low PT1 count, run OCR on visual elements
+        if text_analysis and text_analysis.get('pt1_case_insensitive', 0) < 15:
+            print(f"Low PT1 count detected ({text_analysis.get('pt1_case_insensitive', 0)}), running supplementary OCR...")
+            ocr_patterns = run_supplementary_ocr(temp_pdf_path, pattern_regexes)
+            print(f"OCR found {len(ocr_patterns)} additional patterns")
+        else:
+            ocr_patterns = {}
+        
         # Extract and process data
-        processing_result = extract_and_process_data(combined_doc, document_id, pdf_url, start_time, pdf_metadata)
+        processing_result = extract_and_process_data(combined_doc, document_id, pdf_url, start_time, pdf_metadata, ocr_patterns)
         
         # Upload to R2
         upload_result = upload_to_r2(processing_result, r2_config, document_id, app_project_id)
@@ -202,7 +214,7 @@ def split_pdf_into_chunks(pdf_path, max_pages=15):
     return chunks
 
 def process_single_pdf_chunk(pdf_path, processor_id, project_id, location):
-    """Process a single PDF chunk with Document AI"""
+    """Process a single PDF chunk with Document AI using latest OCR version for better symbol extraction"""
     client = documentai.DocumentProcessorServiceClient()
     
     # Read PDF file
@@ -211,15 +223,29 @@ def process_single_pdf_chunk(pdf_path, processor_id, project_id, location):
     
     print(f"Chunk file size: {len(pdf_content)} bytes")
     
-    # Configure Document AI request
-    processor_name = f"projects/{project_id}/locations/{location}/processors/{processor_id}"
+    # Use the latest OCR processor version for better architectural symbol extraction
+    processor_name = f"projects/{project_id}/locations/{location}/processors/{processor_id}/processorVersions/pretrained-ocr-v2.1-2024-08-07"
     
-    # Process document
+    print("Using OCR processor version: pretrained-ocr-v2.1-2024-08-07 (optimized for symbols)")
+    print("CONFIDENCE THRESHOLDS LOWERED: Token=0.30, Block=0.25, PT-patterns=0.10 minimum")
+    
+    # Process document with OCR-optimized settings
     request = documentai.ProcessRequest(
         name=processor_name,
         raw_document=documentai.RawDocument(
             content=pdf_content,
             mime_type="application/pdf"
+        ),
+        # Add process options for enhanced symbol detection with lowered confidence thresholds
+        process_options=documentai.ProcessOptions(
+            ocr_config=documentai.OcrConfig(
+                enable_native_pdf_parsing=True,
+                enable_image_quality_scores=True,
+                enable_symbol=True,  # Enable symbol detection for architectural elements
+                compute_style_info=True,
+                # Add advanced hints for better symbol recognition
+                advanced_ocr_options=["LEGACY_LAYOUT"]  # Sometimes legacy works better for architectural drawings
+            )
         )
     )
     
@@ -240,7 +266,7 @@ def create_combined_document(all_pages, combined_text, total_pages):
     
     return CombinedDocument(all_pages, combined_text)
 
-def extract_and_process_data(doc, document_id, pdf_url, start_time, pdf_metadata):
+def extract_and_process_data(doc, document_id, pdf_url, start_time, pdf_metadata, ocr_patterns=None):
     """Extract patterns and words with search-optimized structure"""
     
     print("Extracting patterns and words with search-optimized structure...")
@@ -413,13 +439,25 @@ def extract_items_with_bounding_boxes(doc):
     """Extract both patterns and words with bounding boxes from Document AI tokens"""
     items = {}
     
-    # Define pattern regex - matching PT-1, PT1, M1, M-1, etc.
+    # Define multiple pattern regex for comprehensive matching
+    pattern_regexes = [
+        re.compile(r'\bPT-?\d+\b', re.IGNORECASE),           # PT1, PT-1
+        re.compile(r'\bPT\s+\d+\b', re.IGNORECASE),          # PT 1, PT  1
+        re.compile(r'\bPT\.\d+\b', re.IGNORECASE),           # PT.1
+        re.compile(r'\bPT_\d+\b', re.IGNORECASE),            # PT_1
+        re.compile(r'\b[Pp][Tt][-\s\._]?\d+\b', re.IGNORECASE), # Various PT patterns
+        re.compile(r'\b[A-Z]-?\d+\b', re.IGNORECASE)         # Other patterns like M1, E1, etc.
+    ]
+    
+    # Keep original for backward compatibility
     pattern_regex = re.compile(r'\b(PT-?\d+|M-?\d+|[A-Z]-?\d+)\b', re.IGNORECASE)
     
     # Define word regex - meaningful words (3+ chars, not purely numeric)
     word_regex = re.compile(r'\b[A-Za-z][A-Za-z\s]{2,}\b')
     
     print("Extracting patterns and words from Document AI tokens...")
+    print(f"Looking for pattern: {pattern_regex.pattern}")
+    print(f"Document has {len(doc.pages)} pages")
     
     # Extract from each page's tokens
     for page_num, page in enumerate(doc.pages, 1):
@@ -439,7 +477,7 @@ def extract_items_with_bounding_boxes(doc):
                 
                 # Extract bounding box and confidence
                 bounding_box = None
-                confidence = 0.95
+                confidence = 0.30  # Lowered from 0.95 to capture more marginal detections
                 
                 if hasattr(token, 'layout') and hasattr(token.layout, 'bounding_poly'):
                     vertices = []
@@ -454,13 +492,29 @@ def extract_items_with_bounding_boxes(doc):
                         }
                 
                 if hasattr(token, 'layout') and hasattr(token.layout, 'confidence'):
-                    confidence = token.layout.confidence
+                    original_confidence = token.layout.confidence
+                    confidence = original_confidence
+                    # For PT patterns, accept even very low confidence matches
+                    if any('PT' in token_text.upper() for _ in [1]):
+                        print(f"PT pattern '{token_text}' has confidence: {original_confidence:.3f}")
+                        # Accept PT patterns even with very low confidence
+                        confidence = max(0.10, original_confidence)  # Minimum 10% for PT patterns
                 
-                # Check if token is a pattern
-                if pattern_regex.match(token_text):
+                # Check if token is a pattern using multiple regex patterns
+                is_pattern = False
+                for regex in pattern_regexes:
+                    if regex.match(token_text):
+                        is_pattern = True
+                        break
+                
+                if is_pattern:
                     item_key = token_text.upper().strip()
                     item_type = "pattern"
                     category = categorize_pattern(item_key)
+                    
+                    # Add debug logging for PT patterns
+                    if 'PT' in item_key:
+                        print(f"Found PT pattern: '{token_text}' -> '{item_key}' on page {page_num}")
                 
                 # Check if token is a meaningful word
                 elif word_regex.match(token_text) and len(token_text.strip()) >= 3:
@@ -479,14 +533,20 @@ def extract_items_with_bounding_boxes(doc):
                         "locations": []
                     }
                 
-                # Check for duplicates on same page
+                # Check for duplicates on same page with proper distance calculation
                 existing_on_page = False
                 for existing_loc in items[item_key]["locations"]:
                     if existing_loc["page"] == page_num:
-                        # If very close coordinates, consider it duplicate
+                        # Calculate distance between bounding boxes
                         if bounding_box and existing_loc.get("bounding_box"):
-                            existing_on_page = True
-                            break
+                            distance = calculate_bounding_box_distance(bounding_box, existing_loc["bounding_box"])
+                            if distance < 10:  # pixels threshold
+                                existing_on_page = True
+                                print(f"Duplicate {item_key} found on page {page_num} (distance: {distance:.2f}px)")
+                                break
+                        else:
+                            # If no bounding box info, be more lenient
+                            existing_on_page = False
                 
                 if not existing_on_page:
                     items[item_key]["locations"].append({
@@ -509,7 +569,7 @@ def extract_items_with_bounding_boxes(doc):
                     
                     # Extract bounding box from block
                     block_bounding_box = None
-                    block_confidence = 0.85
+                    block_confidence = 0.25  # Lowered from 0.85 to capture more marginal detections
                     
                     if hasattr(block, 'layout') and hasattr(block.layout, 'bounding_poly'):
                         vertices = []
@@ -539,8 +599,15 @@ def extract_items_with_bounding_boxes(doc):
                                 "locations": []
                             }
                         
-                        # Check if we already have this on this page
-                        existing_on_page = any(loc["page"] == page_num for loc in items[item_key]["locations"])
+                        # Check if we already have this on this page with distance check
+                        existing_on_page = False
+                        for existing_loc in items[item_key]["locations"]:
+                            if existing_loc["page"] == page_num:
+                                if block_bounding_box and existing_loc.get("bounding_box"):
+                                    distance = calculate_bounding_box_distance(block_bounding_box, existing_loc["bounding_box"])
+                                    if distance < 20:  # Slightly higher threshold for blocks
+                                        existing_on_page = True
+                                        break
                         
                         if not existing_on_page:
                             items[item_key]["locations"].append({
@@ -550,12 +617,175 @@ def extract_items_with_bounding_boxes(doc):
                             })
                             items[item_key]["total_count"] += 1
     
-    print(f"Found {len(items)} unique items")
+    print(f"Found {len(items)} unique items from Document AI")
     pattern_count = sum(1 for item in items.values() if item["type"] == "pattern")
     word_count = sum(1 for item in items.values() if item["type"] == "word")
-    print(f"Patterns: {pattern_count}, Words: {word_count}")
+    print(f"Document AI - Patterns: {pattern_count}, Words: {word_count}")
+    
+    # Add fallback raw text search for missed patterns
+    print("Running fallback text search...")
+    add_fallback_text_search(doc, items, pattern_regexes)
+    
+    # Log final results
+    final_pattern_count = sum(1 for item in items.values() if item["type"] == "pattern")
+    print(f"Final count - Patterns: {final_pattern_count}, Words: {word_count}")
+    
+    # Add detailed logging for PT patterns
+    log_pt_detection_details(doc, items)
     
     return items
+
+def add_fallback_text_search(doc, items, pattern_regexes):
+    """Search raw document text for missed patterns using fallback method"""
+    print(f"Raw document text length: {len(doc.text)}")
+    print(f"Raw text PT1 count (case-insensitive): {doc.text.upper().count('PT1')}")
+    
+    # Early exit if document is likely image-based
+    if len(doc.text.strip()) < 100:
+        print("WARNING: Document appears to be image-based - fallback text search may not be effective")
+        print("Consider using OCR or Document AI's OCR capabilities")
+        return
+    
+    fallback_found = 0
+    
+    for regex in pattern_regexes:
+        matches = list(regex.finditer(doc.text))
+        print(f"Regex pattern {regex.pattern} found {len(matches)} matches in raw text")
+        
+        for match in matches:
+            pattern = match.group().upper().strip()
+            
+            # Clean up the pattern key (remove extra spaces, etc.)
+            pattern_clean = re.sub(r'\s+', '', pattern)  # Remove all spaces for key
+            
+            if pattern_clean not in items:
+                items[pattern_clean] = {
+                    "type": "pattern",
+                    "category": categorize_pattern(pattern_clean),
+                    "total_count": 1,
+                    "locations": [{
+                        "page": "text_fallback",
+                        "text_position": match.start(),
+                        "source": "fallback_text_search",
+                        "original_match": pattern
+                    }]
+                }
+                fallback_found += 1
+                print(f"Fallback found new pattern: '{pattern}' -> '{pattern_clean}'")
+            else:
+                # Check if we should add this as an additional location
+                existing_has_fallback = any(loc.get("source") == "fallback_text_search" 
+                                          for loc in items[pattern_clean]["locations"])
+                if not existing_has_fallback:
+                    items[pattern_clean]["locations"].append({
+                        "page": "text_fallback",
+                        "text_position": match.start(),
+                        "source": "fallback_text_search",
+                        "original_match": pattern
+                    })
+                    items[pattern_clean]["total_count"] += 1
+    
+    print(f"Fallback search added {fallback_found} new patterns")
+
+def log_pt_detection_details(doc, items):
+    """Detailed logging for PT pattern detection debugging"""
+    print(f"\n=== PT DETECTION SUMMARY ===")
+    
+    pt_patterns = {k: v for k, v in items.items() if 'PT' in k}
+    print(f"Total PT patterns found: {len(pt_patterns)}")
+    
+    for pattern, data in pt_patterns.items():
+        print(f"\nPattern '{pattern}': {data['total_count']} occurrences")
+        for i, loc in enumerate(data['locations']):
+            source = loc.get('source', 'document_ai')
+            page = loc.get('page', 'unknown')
+            original = loc.get('original_match', pattern)
+            print(f"  {i+1}. Page: {page}, Source: {source}, Original: '{original}'")
+    
+    print(f"=== END PT SUMMARY ===\n")
+
+def save_raw_text_extraction(doc, document_id, r2_config):
+    """Save raw text extraction for debugging purposes"""
+    try:
+        print(f"=== RAW TEXT EXTRACTION DEBUG ===")
+        print(f"Document text length: {len(doc.text)} characters")
+        
+        # Check if this is likely an image-based PDF
+        if len(doc.text.strip()) < 100:
+            print("WARNING: Very little text extracted - this might be an image-based PDF")
+        
+        # Save raw text to R2 for analysis
+        raw_text_data = {
+            "document_id": document_id,
+            "raw_text": doc.text,
+            "text_length": len(doc.text),
+            "pages_count": len(doc.pages),
+            "analysis": {
+                "pt1_case_sensitive": doc.text.count('PT1'),
+                "pt1_case_insensitive": doc.text.upper().count('PT1'),
+                "pt_space_1": doc.text.upper().count('PT 1'),
+                "pt_dash_1": doc.text.upper().count('PT-1'),
+                "likely_image_based": len(doc.text.strip()) < 100
+            }
+        }
+        
+        # Upload to R2 for debugging
+        upload_debug_data_to_r2(raw_text_data, r2_config, document_id)
+        
+        # Log summary
+        print(f"Text analysis:")
+        print(f"  - PT1 (case-sensitive): {raw_text_data['analysis']['pt1_case_sensitive']}")
+        print(f"  - PT1 (case-insensitive): {raw_text_data['analysis']['pt1_case_insensitive']}")
+        print(f"  - 'PT 1': {raw_text_data['analysis']['pt_space_1']}")
+        print(f"  - 'PT-1': {raw_text_data['analysis']['pt_dash_1']}")
+        print(f"  - Likely image-based PDF: {raw_text_data['analysis']['likely_image_based']}")
+        
+        # Show first 500 characters for manual inspection
+        preview_text = doc.text[:500].replace('\n', '\\n')
+        print(f"First 500 characters: {preview_text}")
+        
+        print(f"=== END RAW TEXT DEBUG ===\n")
+        
+        return raw_text_data['analysis']
+        
+    except Exception as e:
+        print(f"Error in raw text extraction debug: {str(e)}")
+        return None
+
+def calculate_bounding_box_distance(bbox1, bbox2):
+    """Calculate distance between two bounding boxes"""
+    if not bbox1 or not bbox2:
+        return float('inf')
+    
+    if 'vertices' not in bbox1 or 'vertices' not in bbox2:
+        return float('inf')
+    
+    if len(bbox1['vertices']) == 0 or len(bbox2['vertices']) == 0:
+        return float('inf')
+    
+    # Get center points of bounding boxes
+    center1 = get_bounding_box_center(bbox1)
+    center2 = get_bounding_box_center(bbox2)
+    
+    # Calculate Euclidean distance
+    dx = center1['x'] - center2['x']
+    dy = center1['y'] - center2['y']
+    return (dx**2 + dy**2)**0.5
+
+def get_bounding_box_center(bbox):
+    """Get center point of a bounding box"""
+    vertices = bbox['vertices']
+    if len(vertices) == 0:
+        return {'x': 0, 'y': 0}
+    
+    # Ensure x and y values are numbers (they might be strings from Document AI)
+    sum_x = sum(float(v.get('x', 0)) for v in vertices)
+    sum_y = sum(float(v.get('y', 0)) for v in vertices)
+    
+    return {
+        'x': sum_x / len(vertices),
+        'y': sum_y / len(vertices)
+    }
 
 def categorize_pattern(pattern_text):
     """Categorize technical patterns"""
@@ -594,6 +824,44 @@ def categorize_word(word_text):
         return "dimension"
     else:
         return "general_text"
+
+def upload_debug_data_to_r2(debug_data, r2_config, document_id):
+    """Upload debug data to R2 for analysis"""
+    try:
+        # Get R2 credentials from Secret Manager
+        client = secretmanager.SecretManagerServiceClient()
+        project_id = "ladders-doc-pipeline-462921"
+        
+        access_key = client.access_secret_version(
+            request={"name": f"projects/{project_id}/secrets/r2-access-key/versions/latest"}
+        ).payload.data.decode("UTF-8")
+        
+        secret_key = client.access_secret_version(
+            request={"name": f"projects/{project_id}/secrets/r2-secret-key/versions/latest"}
+        ).payload.data.decode("UTF-8")
+        
+        # Configure R2
+        r2 = boto3.client(
+            's3',
+            endpoint_url='https://1f1a1f3ac82bb92c96b8b8f5ecfe7bb3.r2.cloudflarestorage.com',
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            config=Config(signature_version='s3v4')
+        )
+        
+        # Upload debug data
+        debug_filename = f"debug_raw_text_{document_id}.json"
+        r2.put_object(
+            Bucket=r2_config['bucketName'],
+            Key=debug_filename,
+            Body=json.dumps(debug_data, indent=2),
+            ContentType='application/json'
+        )
+        
+        print(f"Debug data uploaded to R2: {debug_filename}")
+        
+    except Exception as e:
+        print(f"Error uploading debug data: {str(e)}")
 
 def upload_to_r2(processing_result, r2_config, document_id, app_project_id=None):
     """Upload all JSON files directly to R2"""
@@ -711,7 +979,7 @@ def calculate_average_confidence(doc):
                 if hasattr(paragraph, 'confidence'):
                     confidences.append(paragraph.confidence)
     
-    return sum(confidences) / len(confidences) if confidences else 0.95
+    return sum(confidences) / len(confidences) if confidences else 0.30  # Lowered default
 
 def extract_pdf_metadata(pdf_path, pdf_url):
     """Extract comprehensive PDF metadata using PyPDF2"""
