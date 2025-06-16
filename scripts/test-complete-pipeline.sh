@@ -18,28 +18,16 @@ echo ""
 # Set the active project
 gcloud config set project ${PROJECT_ID}
 
-# Load R2 credentials from Secret Manager for the test payload
-echo "📋 Loading R2 credentials from Secret Manager..."
-
-R2_ACCESS_KEY=$(gcloud secrets versions access latest --secret="r2-access-key")
-R2_SECRET_KEY=$(gcloud secrets versions access latest --secret="r2-secret-key")
-R2_ENDPOINT=$(gcloud secrets versions access latest --secret="r2-endpoint")
-
-echo "✅ R2 credentials loaded successfully"
-echo ""
-
 # Test with the Firehouse Subs PDF (our known test document)
 echo "📄 Testing with Firehouse Subs PDF (24 pages, expected patterns: 8×PT-1, 4×M1, 4×M-1)"
+echo "📋 R2 credentials will be loaded automatically by the function from Secret Manager"
 echo ""
 
 TEST_PAYLOAD=$(cat <<EOF
 {
   "pdfUrl": "https://pub-592c678931664039950f4a0846d0d9d1.r2.dev/FLOORPLANS/Firehouse%20Subs%20-%20London(BidSet).pdf",
   "r2Config": {
-    "bucketName": "${R2_BUCKET}",
-    "accessKey": "${R2_ACCESS_KEY}",
-    "secretKey": "${R2_SECRET_KEY}",
-    "endpoint": "${R2_ENDPOINT}"
+    "bucketName": "${R2_BUCKET}"
   },
   "callbackUrl": "https://test-callback.example.com/webhook"
 }
