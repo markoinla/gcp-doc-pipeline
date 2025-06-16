@@ -36,7 +36,7 @@ TEST_PAYLOAD=$(cat <<EOF
 {
   "pdfUrl": "https://pub-592c678931664039950f4a0846d0d9d1.r2.dev/FLOORPLANS/Firehouse%20Subs%20-%20London(BidSet).pdf",
   "r2Config": {
-    "bucket": "${R2_BUCKET}",
+    "bucketName": "${R2_BUCKET}",
     "accessKey": "${R2_ACCESS_KEY}",
     "secretKey": "${R2_SECRET_KEY}",
     "endpoint": "${R2_ENDPOINT}"
