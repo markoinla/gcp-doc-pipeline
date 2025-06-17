@@ -161,6 +161,49 @@ def _upload_single_item(task, project_id, file_id, bucket):
     else:
         raise ValueError(f"Unknown upload task type: {task['type']}")
 
+def batch_upload_image_results_json_only(page_results, project_id, file_id, bucket, max_workers=10):
+    """
+    Upload only JSON results for image pipeline (images already stored)
+    Skips image uploads since images are already in the bucket
+    """
+    
+    batch_start_time = time.time()
+    successful_results = [r for r in page_results if r.get('success')]
+    
+    if not successful_results:
+        logger.warning("No successful results to process")
+        return page_results
+    
+    logger.info(f"Processing {len(successful_results)} page results for image pipeline (JSON only)")
+    
+    # Update page results with assumed image URLs (since images are already stored)
+    updated_results = []
+    for result in page_results:
+        if not result.get('success'):
+            updated_results.append(result)
+            continue
+            
+        page_num = result['page']
+        
+        # Add assumed image URL (images are already in bucket)
+        updated_result = result.copy()
+        
+        # Don't try to upload images - they're already stored
+        # Just set the URL to where they should be
+        if 'image_url' not in updated_result:
+            updated_result['image_url'] = f"{R2_BASE_URL}/projects/{project_id}/files/{file_id}/images/page-{page_num:03d}.jpg"
+        
+        # Remove image_bytes to save memory (if present)
+        if 'image_bytes' in updated_result:
+            del updated_result['image_bytes']
+            
+        updated_results.append(updated_result)
+    
+    batch_time = time.time() - batch_start_time
+    logger.info(f"Image pipeline batch processing completed in {batch_time:.2f}s - {len(successful_results)} results processed")
+    
+    return updated_results
+
 def upload_final_json_optimized(final_result, project_id, file_id, bucket):
     """Upload final JSON using optimized client"""
     client = client_manager.get_r2_client()

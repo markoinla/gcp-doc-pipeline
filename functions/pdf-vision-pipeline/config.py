@@ -18,8 +18,15 @@ R2_BASE_URL = 'https://pub-592c678931664039950f4a0846d0d9d1.r2.dev'
 
 # Pattern Configuration - Regex patterns for matching
 PATTERN_REGEXES = [
-    r'\bPT\d+\b',           # PT1, PT2, etc.
-    r'\bM\d+\b',            # M1, M2, etc.
-    r'\bE\d+\b',            # E1, E2, etc.
-    r'\b[A-Z]-?\d+\b'       # General patterns like A1, S-1, etc.
-] 
+    r'\b[A-Za-z]-?\d+\b',       # General patterns like A1, S-1, a1, s-1, etc.
+    r'\b[A-Za-z]{2}-\d+\b',     # Patterns like AB-123, XY-1, ab-123, xy-1, etc.
+    r'\b[A-Za-z]{2}\d{1,3}\b',  # Patterns like AB12, XY99, ab12, xy99 (1-3 digits)
+]
+
+# Image Input Configuration
+MAX_IMAGES = 50  # Same as MAX_PAGES
+SUPPORTED_IMAGE_FORMATS = ['JPEG', 'PNG', 'WEBP', 'TIFF']
+MAX_IMAGE_SIZE_MB = 10
+
+# Parallel Processing Configuration (MAINTAINED FROM PDF PIPELINE)
+IMAGE_DOWNLOAD_TIMEOUT = 15 # Timeout for individual image downloads 
