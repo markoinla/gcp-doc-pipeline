@@ -27,9 +27,11 @@ def pdf_vision_pipeline(request):
         file_id = request_data.get('fileID', generate_file_id())
         webhook = request_data.get('webhook')
         chunk_size = request_data.get('chunkSize', DEFAULT_CHUNK_SIZE)
+        parallel_workers = request_data.get('parallelWorkers', PARALLEL_WORKERS)
         bucket = request_data.get('bucket', DEFAULT_R2_BUCKET)
         
         logger.info(f"Starting processing for project={project_id}, file={file_id}, PDF={pdf_url}")
+        logger.info(f"Configuration: chunk_size={chunk_size}, parallel_workers={parallel_workers}")
         
         # 2. Download and split PDF
         page_images = pdf_processor.split_pdf_to_images(pdf_url)
@@ -38,7 +40,7 @@ def pdf_vision_pipeline(request):
             return {"error": f"PDF exceeds {MAX_PAGES} page limit"}, 400
             
         # 3. Process pages in parallel chunks
-        page_results = process_pages_parallel(page_images, project_id, file_id, bucket, chunk_size)
+        page_results = process_pages_parallel(page_images, project_id, file_id, bucket, chunk_size, parallel_workers)
         
         # 4. Aggregate results
         final_result = result_aggregator.compile_final_json(page_results, project_id, file_id)
@@ -84,13 +86,18 @@ def validate_request(request):
     if not isinstance(chunk_size, int) or chunk_size < 1 or chunk_size > 15:
         raise ValueError("chunkSize must be between 1 and 15")
     
+    # Validate parallel workers
+    parallel_workers = data.get('parallelWorkers', PARALLEL_WORKERS)
+    if not isinstance(parallel_workers, int) or parallel_workers < 1 or parallel_workers > 50:
+        raise ValueError("parallelWorkers must be between 1 and 50")
+    
     return data
 
 def generate_file_id():
     """Generate a unique file ID"""
     return f"file-{str(uuid.uuid4())[:8]}"
 
-def process_pages_parallel(page_images, project_id, file_id, bucket, chunk_size):
+def process_pages_parallel(page_images, project_id, file_id, bucket, chunk_size, parallel_workers):
     """Process pages using ThreadPoolExecutor with chunking"""
     results = []
     
@@ -98,8 +105,9 @@ def process_pages_parallel(page_images, project_id, file_id, bucket, chunk_size)
     page_chunks = [page_images[i:i + chunk_size] for i in range(0, len(page_images), chunk_size)]
     
     logger.info(f"Processing {len(page_images)} pages in {len(page_chunks)} chunks of size {chunk_size}")
+    logger.info(f"Using {parallel_workers} parallel workers")
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=parallel_workers) as executor:
         # Submit chunk processing tasks
         future_to_chunk = {
             executor.submit(vision_processor.process_page_chunk, chunk, chunk_idx * chunk_size + 1, project_id, file_id, bucket): chunk_idx

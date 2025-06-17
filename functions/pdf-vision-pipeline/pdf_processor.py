@@ -1,14 +1,15 @@
-from pdf2image import convert_from_bytes
+import fitz  # PyMuPDF
 import requests
 import io
 import logging
+from PIL import Image
 
 from config import IMAGE_DPI, IMAGE_FORMAT
 
 logger = logging.getLogger(__name__)
 
 def split_pdf_to_images(pdf_url):
-    """Download PDF and convert to images"""
+    """Download PDF and convert to images using PyMuPDF"""
     
     logger.info(f"Downloading PDF from: {pdf_url}")
     
@@ -20,12 +21,27 @@ def split_pdf_to_images(pdf_url):
     pdf_bytes = response.content
     logger.info(f"Downloaded PDF: {len(pdf_bytes)} bytes")
     
-    # Convert to images
-    images = convert_from_bytes(
-        pdf_bytes, 
-        dpi=IMAGE_DPI,
-        fmt=IMAGE_FORMAT.lower()
-    )
+    # Open PDF with PyMuPDF
+    pdf_document = fitz.open(stream=pdf_bytes, filetype="pdf")
+    images = []
+    
+    # Convert each page to image
+    for page_num in range(pdf_document.page_count):
+        page = pdf_document[page_num]
+        
+        # Calculate zoom factor for desired DPI (default 72 DPI)
+        zoom = IMAGE_DPI / 72.0
+        mat = fitz.Matrix(zoom, zoom)
+        
+        # Render page to pixmap
+        pix = page.get_pixmap(matrix=mat)
+        
+        # Convert to PIL Image
+        img_data = pix.tobytes("jpeg")
+        image = Image.open(io.BytesIO(img_data))
+        images.append(image)
+    
+    pdf_document.close()
     
     logger.info(f"Converted PDF to {len(images)} page images at {IMAGE_DPI} DPI")
     return images
