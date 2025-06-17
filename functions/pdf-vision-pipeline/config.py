@@ -3,7 +3,7 @@ import os
 # Processing Configuration
 MAX_PAGES = 50
 PARALLEL_WORKERS = 15
-DEFAULT_CHUNK_SIZE = 5  # Pages per worker chunk
+DEFAULT_CHUNK_SIZE = 2  # Pages per worker chunk (optimized for best performance)
 IMAGE_DPI = 150
 IMAGE_FORMAT = 'JPEG'
 RETRY_ATTEMPTS = 3
