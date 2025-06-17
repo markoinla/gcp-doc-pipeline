@@ -75,7 +75,7 @@ def upload_final_json(final_result, project_id, file_id, bucket):
     """Upload aggregated final JSON using singleton client"""
     client = client_manager.get_r2_client()
     
-    key = f"projects/{project_id}/files/{file_id}/json/final-results.json"
+    key = f"{project_id}/files/{file_id}/json/final-results.json"
     
     try:
         client.put_object(
