@@ -8,8 +8,7 @@ You are tasked with creating a Google Cloud Workflow that processes PDF document
 
 ### Current Setup
 - **Cloudflare Workers Project**: `cf-pdf-workers` - Handles API layer, user interfaces, R2 storage, D1 indexing
-- **Google Cloud Project**: `document-processing-workflows` (NEW) - Handles PDF processing workflows
-- **Existing Document AI Processor**: Enterprise OCR processor (ID: `5aa847e724b9d72`) in project `ladders-ai`
+- **Google Cloud Project**: `ladders-doc-pipeline` (NEW) - Handles PDF processing workflows
 
 ### Integration Flow
 ```
@@ -24,15 +23,16 @@ Stores in R2 + indexes in D1
 ### 1. PDF Processing Constraints
 - **Image-based PDFs**: Many PDFs are scanned documents or CAD exports with no text layer
 - **OCR Required**: Must use Document AI Enterprise OCR for all pages
-- **Page Limit**: Document AI has 15-page limit per request
+- **Page Limit**: Try to implement workflow to work with any size PDF, if running into issues lets try 15-page limit per request
 - **Target Size**: Support PDFs up to 50+ pages
-- **Solution**: Split PDFs into 15-page chunks and process in parallel
+- **Solution**: Split PDFs into 15-page chunks and process in parallel if needed. First test with large PDFs
 
 ### 2. Pattern Extraction Requirements
 Extract specific technical patterns with bounding boxes:
 - `PT-1`, `PT1` (paint/coating specifications)
 - `M1`, `M-1` (material specifications)  
 - `[A-Z]\d+`, `[A-Z]-\d+` (general technical codes)
+- I want to make every word searchable -- not single letters. Include words with hyphens, dashes, slashes, etc.
 
 ### 3. Output Requirements
 Generate structured JSON optimized for search and indexing:
