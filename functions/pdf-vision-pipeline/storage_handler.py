@@ -42,13 +42,17 @@ def upload_page_json(patterns, project_id, file_id, page_num, bucket):
     """Upload page JSON to R2 using singleton client"""
     client = client_manager.get_r2_client()
     
+    # Create pattern count by text content instead of pattern_type
+    pattern_count = {}
+    if patterns:
+        for pattern in patterns:
+            text = pattern['text'].strip()
+            pattern_count[text] = pattern_count.get(text, 0) + 1
+    
     page_data = {
         "page_number": page_num,
         "patterns": patterns,
-        "pattern_count": {
-            pattern_type: len([p for p in patterns if p['pattern_type'] == pattern_type])
-            for pattern_type in set(p['pattern_type'] for p in patterns)
-        } if patterns else {},
+        "pattern_count": pattern_count,
         "total_patterns": len(patterns),
         "timestamp": datetime.utcnow().isoformat()
     }

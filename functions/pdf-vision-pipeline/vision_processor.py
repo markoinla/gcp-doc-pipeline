@@ -136,7 +136,8 @@ def call_vision_api(image_bytes):
     client = client_manager.get_vision_client()
     
     image = vision.Image(content=image_bytes)
-    response = client.text_detection(image=image)
+    # Use DOCUMENT_TEXT_DETECTION to get paragraph structure
+    response = client.document_text_detection(image=image)
     
     if response.error.message:
         raise Exception(f"Vision API error: {response.error.message}")

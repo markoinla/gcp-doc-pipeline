@@ -135,13 +135,17 @@ def _upload_single_item(task, project_id, file_id, bucket):
         
     elif task['type'] == 'json':
         # Upload JSON
+        # Create pattern count by text content instead of pattern_type
+        pattern_count = {}
+        if task['data']:
+            for pattern in task['data']:
+                text = pattern['text'].strip()
+                pattern_count[text] = pattern_count.get(text, 0) + 1
+        
         page_data = {
             "page_number": page_num,
             "patterns": task['data'],
-            "pattern_count": {
-                pattern_type: len([p for p in task['data'] if p['pattern_type'] == pattern_type])
-                for pattern_type in set(p['pattern_type'] for p in task['data'])
-            } if task['data'] else {},
+            "pattern_count": pattern_count,
             "total_patterns": len(task['data']),
             "timestamp": datetime.utcnow().isoformat()
         }

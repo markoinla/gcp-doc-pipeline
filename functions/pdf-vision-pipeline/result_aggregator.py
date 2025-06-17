@@ -131,8 +131,8 @@ def compile_final_json_images(page_results, project_id, file_id, actual_processi
 def create_search_index_images(all_patterns, images_data):
     """Create optimized search index for image processing"""
     
-    # Extract unique pattern types
-    unique_patterns = list(set(p['pattern_type'] for p in all_patterns))
+    # Extract unique text values (instead of pattern types)
+    unique_texts = list(set(p['text'] for p in all_patterns))
     
     # Get images that have patterns
     images_with_patterns = sorted(list(set(p['page_number'] for p in all_patterns)))
@@ -144,28 +144,30 @@ def create_search_index_images(all_patterns, images_data):
             patterns_by_page[str(page['page_number'])] = len(page['patterns'])
     
     return {
-        "unique_patterns": unique_patterns,
+        "unique_patterns": unique_texts,
         "pages_with_patterns": images_with_patterns,
         "total_pattern_count": len(all_patterns),
         "patterns_by_page": patterns_by_page
     }
 
 def calculate_pattern_counts(patterns):
-    """Calculate pattern counts by type"""
+    """Calculate pattern counts by text content"""
     if not patterns:
         return {}
     
     counts = defaultdict(int)
     for pattern in patterns:
-        counts[pattern['pattern_type']] += 1
+        # Group by text content instead of pattern_type
+        text = pattern['text'].strip()
+        counts[text] += 1
     
     return dict(counts)
 
 def create_search_index(all_patterns, pages_data):
     """Create optimized search index"""
     
-    # Extract unique pattern types
-    unique_patterns = list(set(p['pattern_type'] for p in all_patterns))
+    # Extract unique text values (instead of pattern types)
+    unique_texts = list(set(p['text'] for p in all_patterns))
     
     # Get pages that have patterns
     pages_with_patterns = sorted(list(set(p['page_number'] for p in all_patterns)))
@@ -177,7 +179,7 @@ def create_search_index(all_patterns, pages_data):
             patterns_by_page[str(page['page_number'])] = len(page['patterns'])
     
     return {
-        "unique_patterns": unique_patterns,
+        "unique_patterns": unique_texts,
         "pages_with_patterns": pages_with_patterns,
         "total_pattern_count": len(all_patterns),
         "patterns_by_page": patterns_by_page
@@ -189,16 +191,17 @@ def aggregate_pattern_statistics(all_patterns):
     if not all_patterns:
         return {}
     
-    # Group patterns by type
+    # Group patterns by text content instead of pattern_type
     pattern_groups = defaultdict(list)
     for pattern in all_patterns:
-        pattern_groups[pattern['pattern_type']].append(pattern)
+        text = pattern['text'].strip()
+        pattern_groups[text].append(pattern)
     
     # Create aggregated statistics
     aggregated = {}
-    for pattern_type, patterns in pattern_groups.items():
+    for text, patterns in pattern_groups.items():
         pages = sorted(list(set(p['page_number'] for p in patterns)))
-        aggregated[pattern_type] = {
+        aggregated[text] = {
             "total_count": len(patterns),
             "pages": pages,
             "avg_confidence": sum(p['confidence'] for p in patterns) / len(patterns) if patterns else 0.0
