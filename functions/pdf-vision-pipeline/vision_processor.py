@@ -42,7 +42,7 @@ def process_page_chunk(page_images, start_page_num, project_id, file_id, bucket)
                     "page": page_num,
                     "success": True,
                     "image_url": image_url,
-                    "page_json_url": page_json_url,
+                    "json_url": page_json_url,
                     "patterns": patterns,
                     "pattern_count": len(patterns),
                     "processing_time": processing_time
