@@ -11,6 +11,8 @@ import pdf_processor
 import vision_processor
 import storage_handler
 import result_aggregator
+import batch_storage
+from client_manager import client_manager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -20,6 +22,9 @@ logger = logging.getLogger(__name__)
 def pdf_vision_pipeline(request):
     """Main pipeline orchestrator"""
     try:
+        # Track total pipeline processing time
+        pipeline_start_time = time.time()
+        
         # 1. Validate input
         request_data = validate_request(request)
         pdf_url = request_data['pdfUrl']  # Required
@@ -33,26 +38,40 @@ def pdf_vision_pipeline(request):
         logger.info(f"Starting processing for project={project_id}, file={file_id}, PDF={pdf_url}")
         logger.info(f"Configuration: chunk_size={chunk_size}, parallel_workers={parallel_workers}")
         
+        # Initialize singleton clients (connection pooling optimization)
+        client_init_start = time.time()
+        client_manager.get_vision_client()  # Pre-initialize Vision API client
+        client_manager.get_r2_client()      # Pre-initialize R2 client
+        client_init_time = time.time() - client_init_start
+        logger.info(f"Client initialization completed in {client_init_time:.2f}s")
+        
         # 2. Download and split PDF
         page_images = pdf_processor.split_pdf_to_images(pdf_url)
         
         if len(page_images) > MAX_PAGES:
             return {"error": f"PDF exceeds {MAX_PAGES} page limit"}, 400
             
-        # 3. Process pages in parallel chunks
+        # 3. Process pages in parallel chunks (Vision API + pattern extraction only)
         page_results = process_pages_parallel(page_images, project_id, file_id, bucket, chunk_size, parallel_workers)
         
-        # 4. Aggregate results
-        final_result = result_aggregator.compile_final_json(page_results, project_id, file_id)
+        # 4. Batch upload all storage operations in parallel (OPTIMIZATION)
+        batch_upload_start = time.time()
+        page_results = batch_storage.batch_upload_page_results(page_results, project_id, file_id, bucket)
+        batch_upload_time = time.time() - batch_upload_start
+        logger.info(f"Batch storage completed in {batch_upload_time:.2f}s")
         
-        # 5. Upload final JSON
-        final_json_url = storage_handler.upload_final_json(final_result, project_id, file_id, bucket)
+        # 5. Aggregate results (pass actual processing time)
+        actual_processing_time = time.time() - pipeline_start_time
+        final_result = result_aggregator.compile_final_json(page_results, project_id, file_id, actual_processing_time)
         
-        # 6. Send webhook if provided
+        # 6. Upload final JSON (optimized)
+        final_json_url = batch_storage.upload_final_json_optimized(final_result, project_id, file_id, bucket)
+        
+        # 7. Send webhook if provided
         if webhook:
             send_webhook_notification(webhook, final_result)
         
-        # 7. Return response
+        # 8. Return response
         response = {
             "success": True,
             "project_id": project_id,

@@ -13,16 +13,17 @@ FUNCTION_URL="https://us-central1-ladders-doc-pipeline-462921.cloudfunctions.net
 PDF_URL="https://pub-592c678931664039950f4a0846d0d9d1.r2.dev/FLOORPLANS/ebGames%20-%20White%20Oaks(ARCH).pdf"
 PROJECT_ID="my-project-123"
 FILE_ID="document-$(date +%s)"
-CHUNK_SIZE=1
-PARALLEL_WORKERS=30
+CHUNK_SIZE=3
+PARALLEL_WORKERS=15
 
 echo "📋 API Call Configuration:"
 echo "   🔗 Endpoint: $FUNCTION_URL"
 echo "   📄 PDF: $PDF_URL"
 echo "   📁 Project: $PROJECT_ID"
 echo "   📋 File ID: $FILE_ID"
-echo "   📦 Chunk Size: $CHUNK_SIZE"
-echo "   👥 Parallel Workers: $PARALLEL_WORKERS"
+echo "   📦 Chunk Size: $CHUNK_SIZE (OPTIMIZED ⚡)"
+echo "   👥 Parallel Workers: $PARALLEL_WORKERS (OPTIMIZED ⚡)"
+echo "   🚀 Client Pooling: ENABLED (Connection Reuse)"
 echo ""
 
 # Create the API payload

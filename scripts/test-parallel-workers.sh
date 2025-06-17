@@ -17,10 +17,7 @@ echo ""
 
 # Test configurations
 declare -a WORKER_CONFIGS=(
-    "10:3"    # 5 workers, chunk_size 5
-    "15:1"   # 15 workers, chunk_size 1
-    "15:2"   # 15 workers, chunk_size 5
-    "30:1"   # 30 workers, chunk_size 1
+    "15:2"
 )
 
 # Create temp directory for storing results

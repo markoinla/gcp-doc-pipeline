@@ -6,6 +6,7 @@ from config import RETRY_ATTEMPTS, RETRY_DELAY, VISION_TIMEOUT
 import pdf_processor
 import pattern_extractor
 import storage_handler
+from client_manager import client_manager
 
 logger = logging.getLogger(__name__)
 
@@ -30,19 +31,13 @@ def process_page_chunk(page_images, start_page_num, project_id, file_id, bucket)
                 # Extract patterns
                 patterns = pattern_extractor.extract_patterns_from_vision(vision_result, page_num)
                 
-                # Upload image to R2
-                image_url = storage_handler.upload_page_image(image_bytes, project_id, file_id, page_num, bucket)
-                
-                # Upload page JSON to R2  
-                page_json_url = storage_handler.upload_page_json(patterns, project_id, file_id, page_num, bucket)
-                
                 processing_time = time.time() - start_time
                 
+                # Store data for batch upload (no individual uploads)
                 results.append({
                     "page": page_num,
                     "success": True,
-                    "image_url": image_url,
-                    "json_url": page_json_url,
+                    "image_bytes": image_bytes,  # Store for batch upload
                     "patterns": patterns,
                     "pattern_count": len(patterns),
                     "processing_time": processing_time
@@ -66,8 +61,9 @@ def process_page_chunk(page_images, start_page_num, project_id, file_id, bucket)
     return results
 
 def call_vision_api(image_bytes):
-    """Call Google Cloud Vision API"""
-    client = vision.ImageAnnotatorClient()
+    """Call Google Cloud Vision API using singleton client"""
+    # Use singleton client instead of creating new one each time
+    client = client_manager.get_vision_client()
     
     image = vision.Image(content=image_bytes)
     response = client.text_detection(image=image)

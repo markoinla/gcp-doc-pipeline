@@ -7,10 +7,10 @@ from config import PARALLEL_WORKERS, IMAGE_DPI
 
 logger = logging.getLogger(__name__)
 
-def compile_final_json(page_results, project_id, file_id):
+def compile_final_json(page_results, project_id, file_id, actual_processing_time=None):
     """Compile search-optimized final JSON"""
     
-    start_time = time.time()
+    compilation_start_time = time.time()
     successful_results = [r for r in page_results if r['success']]
     failed_results = [r for r in page_results if not r['success']]
     
@@ -49,7 +49,8 @@ def compile_final_json(page_results, project_id, file_id):
             "total_pages": len(page_results),
             "processed_pages": len(successful_results),
             "failed_pages": [{"page": r['page'], "error": r['error']} for r in failed_results],
-            "processing_time_seconds": time.time() - start_time,
+            "processing_time_seconds": actual_processing_time if actual_processing_time else time.time() - compilation_start_time,
+            "compilation_time_seconds": time.time() - compilation_start_time,
             "timestamp": datetime.utcnow().isoformat(),
             "configuration": {
                 "parallel_workers": PARALLEL_WORKERS,
